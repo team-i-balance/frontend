@@ -42,7 +42,7 @@ class FileWindow(tk.Toplevel):
         tk.Label(self, text="파일 검사", font=theme.TITLE, bg="white", anchor="w").pack(fill="x")
         intro = INTRO
         if app.server_mode():
-            intro += "\n서버 처리 모드여도 파일 검사는 아직 이 PC에서 해요 (서버에 파일 검사 API가 없어요)."
+            intro += "\n서버 처리 모드여도 파일 검사는 아직 이 PC에서 해요 (서버 파일 API가 보호본 파일을 돌려주지 않아요)."
         tk.Label(self, text=intro, font=theme.SMALL, bg="white", fg=theme.MUTED, anchor="w", justify="left",
                  wraplength=590).pack(fill="x", pady=(2, 10))
         row = tk.Frame(self, bg="white")
