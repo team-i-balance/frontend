@@ -235,6 +235,22 @@ build.ps1 · KPGuard.spec   데스크톱 앱(exe) 빌드
 - 모든 예시 값은 합성 데이터
 - exe는 코드 서명이 없어 SmartScreen·백신 경고가 뜰 수 있고, 설치 프로그램은 아직 없다 (태스크 27)
 
+## macOS 실행과 검증
+
+macOS에서 Python 3.10 이상과 tkinter가 준비되면 가상환경을 만들고 `pip install -r requirements-dev.txt`를 실행한 다음 `python -m agent.main`으로 실행한다. 모델 파일은 별도로 준비해 설정 창에서 선택한다. 네트워크를 사용하지 않으려면 처리 위치를 **이 PC에서만 처리**로 선택한다. 기존 설정의 서버 주소와 처리 위치도 확인한다.
+
+| 기능 | Windows | macOS |
+|---|---|---|
+| 수동 텍스트 검사·XLSX | 지원 | 자동 테스트 적용; 실제 GUI 확인 필요 |
+| 트레이/메뉴 막대 | Windows 트레이 | 메뉴 막대 구현; 실제 GUI 확인 필요 |
+| 전역 단축키 | Ctrl+Alt | ⌘+⌥ 감지; 입력 모니터링 권한과 충돌 확인 필요 |
+| 클립보드 감시 | Windows API | macOS Pasteboard; 권한·앱 간 복사 확인 필요 |
+| 로그인 자동 실행 | 레지스트리 | LaunchAgent; 실제 로그인 재검증 필요 |
+
+macOS의 시스템 설정에서 앱이 요청하는 입력 모니터링 등 권한을 확인한다. 권한을 거부하면 자동 감시나 전역 단축키가 제한될 수 있으며 직접 입력으로 점검할 수 있다. 전역 단축키 입력은 다른 앱에도 전달될 수 있다.
+
+자동 테스트: `python -m unittest discover -s tests -t . -v`. CI는 macOS와 Windows에서 각각 실행한다. GUI, 실제 모델, 권한 승인 및 로그인 흐름은 자동 테스트만으로 확인되지 않는다. 원문과 매핑을 외부로 전송하지 않는 조건을 적용할 때는 실제 설정과 연결 대상을 별도로 확인한다.
+
 ## macOS 앱 빌드
 
 macOS에서 Python 가상환경을 활성화하고 `pip install -r requirements.txt -r requirements-build.txt`를 실행한 뒤 `./build-macos.sh`로 `dist/KPGuard.app`을 만듭니다. 모델 파일은 앱에 포함되지 않으므로 별도로 로컬에 준비해야 합니다.
