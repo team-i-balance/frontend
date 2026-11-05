@@ -104,6 +104,8 @@ class OverlayChipTests(unittest.TestCase):
         # Windows·macOS start the real reader thread, ticker and Enter guard. These tests drive the chip directly.
         self.overlay.stop.set()
         self.addCleanup(self.stop_overlay)
+        if self.overlay.paint is not None:
+            self.overlay.paint.close()  # frees the Windows window class for the platform tests that follow
         self.overlay.paint = Mock(screen_at=lambda x, y: (0, 0, 1600, 1000), pointer=lambda: (0, 0, False))
         self.overlay.platform = None
 

@@ -515,8 +515,13 @@ class Paint:
             brush=self.brush,
             name=self.name,
         )
-        if not api(user, "RegisterClassW", W.ATOM, C.POINTER(WNDCLASS))(C.byref(wc)):
-            raise C.WinError(C.get_last_error())
+        register = api(user, "RegisterClassW", W.ATOM, C.POINTER(WNDCLASS))
+        if not register(C.byref(wc)):
+            error = C.get_last_error()
+            # A previous overlay in this process left the class registered: replace it with this brush.
+            unregister = api(user, "UnregisterClassW", W.BOOL, W.LPCWSTR, W.HINSTANCE)
+            if error != 1410 or not unregister(self.name, self.instance) or not register(C.byref(wc)):
+                raise C.WinError(error)
         self.create = api(
             user,
             "CreateWindowExW",
