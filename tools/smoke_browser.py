@@ -81,6 +81,7 @@ def check_editor(context, peer, desktop, site, use_shell):
         ),
     )
     if use_shell:
+        peer("reset")  # the shell shares one desktop channel across both sites
         page.expose_function(
             "fixtureMessage",
             lambda m: {
