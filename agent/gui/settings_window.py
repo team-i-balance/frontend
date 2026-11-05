@@ -33,25 +33,29 @@ class SettingsWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
         self.app = app
-        theme.window(self, "KP Guard — 설정·상태", 1200, 780, 1000, 600)
+        theme.window(self, f"설정·상태 — {theme.APP_TITLE}", 1200, 780, 1000, 600)
         self.protocol("WM_DELETE_WINDOW", self._close)
-        gap, px = theme.px(16), theme.px
+        gap, px = theme.px(24), theme.px
 
+        # 화면 머리: 로고 마크(22) + 이름 22/600 + 상태 점, 아래 회색 메타 한 줄
         head = tk.Frame(self, bg=theme.BG_CANVAS)
         head.pack(fill="x", padx=gap, pady=(gap, 0))
         title_row = tk.Frame(head, bg=theme.BG_CANVAS)
         title_row.pack(fill="x")
-        tk.Label(title_row, text="KP Guard", font=theme.F["title24"], bg=theme.BG_CANVAS,
+        mark = tk.Canvas(title_row, width=px(22), height=px(22), highlightthickness=0, bd=0, bg=theme.BG_CANVAS)
+        theme.draw_mark(mark, 0, 0, px(22))
+        mark.pack(side="left", padx=(0, px(8)))
+        tk.Label(title_row, text=theme.APP_TITLE, font=theme.F["t22s"], bg=theme.BG_CANVAS,
                  fg=theme.TEXT_PRIMARY).pack(side="left")
-        self.status = theme.Badge(title_row)
-        self.status.pack(side="left", padx=(px(12), 0))
+        self.status = theme.StatusDot(title_row)
+        self.status.pack(side="left", padx=(px(16), 0), pady=(px(4), 0))
         self.sub = theme.label(head, "", wraplength=px(1100))
-        self.sub.pack(fill="x", pady=(px(6), 0))
+        self.sub.pack(fill="x", pady=(px(4), 0))
 
         bottom = tk.Frame(self, bg=theme.BG_CANVAS)
         bottom.pack(side="bottom", fill="x", padx=gap, pady=(px(8), gap))
         theme.Button(bottom, "매핑 초기화", self._reset_mapping, kind="ghost", size="sm").pack(side="left")
-        theme.Button(bottom, "KP Guard 종료", lambda: app.post("quit"), kind="danger", size="sm").pack(side="right")
+        theme.Button(bottom, f"{theme.APP_TITLE} 종료", lambda: app.post("quit"), kind="danger", size="sm").pack(side="right")
 
         cols = tk.Frame(self, bg=theme.BG_CANVAS)
         cols.pack(fill="both", expand=True, padx=gap, pady=(px(16), 0))
@@ -68,7 +72,7 @@ class SettingsWindow(tk.Toplevel):
         self.v_clip = tk.BooleanVar(value=app.settings["clipboard_watch"])
         self.v_auto = tk.BooleanVar(value=autostart.is_enabled())
         for text, var, cmd in (("감시", self.v_monitor, self._toggle_monitor),
-                               ("복사한 프롬프트 자동 점검", self.v_clip, self._toggle_clip),
+                               ("복사한 프롬프트 자동 점검 (점검 창이 열려요)", self.v_clip, self._toggle_clip),
                                ("Windows 시작 시 자동 실행", self.v_auto, self._toggle_auto)):
             theme.Switch(box.body, text, var, cmd).pack(anchor="w", pady=(0, px(12)))
         if __import__("sys").platform == "darwin":
@@ -103,7 +107,7 @@ class SettingsWindow(tk.Toplevel):
         theme.Button(brow, "저장·연결 확인", self._save_server, size="sm").pack(side="left")
         self.btn_auth = theme.Button(brow, "인증·인증서…", self._open_auth, kind="ghost", size="sm")
         self.btn_auth.pack(side="left", padx=(px(8), 0))
-        self.server_info = theme.label(pbox.body, "", wraplength=px(330))
+        self.server_info = theme.label(pbox.body, "", wraplength=px(300))
         self.server_info.pack(fill="x", pady=(px(8), 0))
 
         # ---------------------------------------------------------------- 열기
@@ -119,13 +123,13 @@ class SettingsWindow(tk.Toplevel):
             side="right", padx=(px(8), 0))
         self.sample = theme.Select(srow, list(SAMPLES), size="sm")
         self.sample.pack(side="left", fill="x", expand=True)
-        self.hotkey_info = theme.label(act.body, "", "caption12", theme.TEXT_TERTIARY, wraplength=px(330))
+        self.hotkey_info = theme.label(act.body, "", "caption12", theme.TEXT_TERTIARY, wraplength=px(300))
         self.hotkey_info.pack(fill="x", pady=(px(12), 0))
 
         # ---------------------------------------------------------------- 소형 모델
         mbox = theme.Card(col2, title="이 PC의 소형 모델", caption="이 PC에서 처리할 때 쓰는 2단계 탐지", fit=True)
         mbox.pack(fill="x", pady=(px(16), 0))
-        self.model_info = theme.label(mbox.body, "", wraplength=px(330))
+        self.model_info = theme.label(mbox.body, "", wraplength=px(300))
         self.model_info.pack(fill="x")
         mrow = tk.Frame(mbox.body, bg=theme.BG_SURFACE)
         mrow.pack(fill="x", pady=(px(12), 0))
@@ -254,7 +258,7 @@ class SettingsWindow(tk.Toplevel):
             from ..overlay.macos import request_access
             request_access()
         except ImportError:
-            self.app.toast("화면 연동 모듈을 설치한 후 다시 실행해 주세요.")
+            self.app.toast("화면 연동 모듈을 설치한 후 다시 실행해 주세요.", tone="warning")
 
     def _toggle_clip(self) -> None:
         self.app.settings["clipboard_watch"] = self.v_clip.get()
@@ -264,7 +268,7 @@ class SettingsWindow(tk.Toplevel):
         try:
             autostart.enable() if self.v_auto.get() else autostart.disable()
         except OSError as exc:
-            self.app.toast(f"자동 시작 설정 실패: {exc}")
+            self.app.toast(f"자동 시작을 바꾸지 못했어요: {exc}", tone="error")
         self.v_auto.set(autostart.is_enabled())
 
     def _set_processing(self) -> None:
@@ -274,7 +278,7 @@ class SettingsWindow(tk.Toplevel):
     def _save_server(self) -> None:
         self.app.set_server(self.v_proc.get(), self.v_url.get())
         if self.app.server is None:
-            self.app.toast("서버 주소는 https://주소[:포트] 형식으로 적어 주세요")
+            self.app.toast("서버 주소는 https://주소[:포트] 형식으로 적어 주세요", tone="warning")
         self.refresh()
 
     def _open_auth(self) -> None:

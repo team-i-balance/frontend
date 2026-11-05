@@ -44,7 +44,7 @@ class FileWindow(tk.Toplevel):
         self._busy = False
         self._job = 0
 
-        theme.window(self, "파일 검사 — KP Guard", 760, 680, 620, 540)
+        theme.window(self, f"파일 검사 — {theme.APP_TITLE}", 760, 680, 620, 540)
         self.protocol("WM_DELETE_WINDOW", self._close)
         gap = theme.px(16)
 
@@ -108,7 +108,7 @@ class FileWindow(tk.Toplevel):
         if self._busy:
             return
         if Path(path).suffix.lower() != ".xlsx":
-            self.app.toast(".xlsx 파일만 검사할 수 있어요")
+            self.app.toast(".xlsx 파일만 검사할 수 있어요", tone="warning")
             return
         self._busy = True
         self._job += 1
@@ -250,14 +250,14 @@ class FileWindow(tk.Toplevel):
         path = Path(path)
         try:
             if path.suffix.lower() != ".xlsx":
-                self.app.toast("보호본은 .xlsx 파일로 저장해 주세요")
+                self.app.toast("보호본은 .xlsx 파일로 저장해 주세요", tone="warning")
                 return False
             if self.source and (path.resolve() == self.source.resolve() or (path.exists() and path.samefile(self.source))):
-                self.app.toast("원본 파일 위에는 저장할 수 없어요. 다른 이름을 고르세요")
+                self.app.toast("원본 파일 위에는 저장할 수 없어요. 다른 이름을 고르세요", tone="warning")
                 return False
             path.write_bytes(self.report.file_bytes)
         except OSError as exc:
-            self.app.toast(f"저장하지 못했어요: {exc.strerror or exc}")
+            self.app.toast(f"저장하지 못했어요: {exc.strerror or exc}", tone="error")
             return False
         self._log("file_sanitized", self.report.grade, self.report)
         self.app.toast(f"보호본을 저장했어요: {path.name} · 이 파일을 AI에 올리세요")

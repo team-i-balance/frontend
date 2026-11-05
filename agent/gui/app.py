@@ -76,7 +76,7 @@ class App:
         theme.load_fonts()  # 동봉한 Pretendard (Tk를 만들기 전에)
         self.root = tk.Tk()
         self.root.withdraw()
-        self.root.title("KP Guard")
+        self.root.title(theme.APP_TITLE)
         theme.setup(self.root)
 
         self.settings = config.load_settings()
@@ -154,7 +154,7 @@ class App:
                 self.browser.start()
             except OSError:
                 self.browser = None
-                self.toast("브라우저 연결 포트를 열 수 없습니다. 실행 중인 KP Guard를 확인하세요.")
+                self.toast(f"브라우저 연결 포트를 열 수 없어요. 이미 실행 중인 {theme.APP_TITLE}가 있는지 확인하세요.", tone="error")
         return self.browser is not None
 
     def pair_browser(self):
@@ -163,7 +163,7 @@ class App:
             self.save_settings()
         if self.start_browser():
             self.copy_to_clipboard(self.settings["browser_key"])
-            self.toast("연결 코드를 복사했습니다. 브라우저의 KP Guard 확장에 붙여넣으세요.")
+            self.toast(f"연결 코드를 복사했어요. 브라우저의 {theme.APP_TITLE} 확장에 붙여넣으세요.")
 
     def disconnect_browser(self):
         self.settings.pop("browser_key", None)
@@ -171,7 +171,7 @@ class App:
         if self.browser:
             self.browser.stop()
             self.browser = None
-        self.toast("브라우저 연결을 해제했습니다.")
+        self.toast("브라우저 연결을 해제했어요.")
 
     def detector(self):
         """지금 쓸 수 있는 2단계 모델 (없으면 None → 규칙·사전만)."""
@@ -356,11 +356,7 @@ class App:
         self.root.after(100, self._poll)
 
     def _dispatch(self, cmd: str, *args) -> None:
-        if cmd == "browser_detail":
-            self.open_review(args[0], "browser")
-        elif cmd == "browser_restore":
-            self.open_restore(args[0])
-        elif cmd == "server_tools":
+        if cmd == "server_tools":
             if self.server_mode() and self.server:
                 from .server_tools import ServerToolsWindow
                 ServerToolsWindow(self)
@@ -400,16 +396,20 @@ class App:
                 return  # 그 사이 설정을 바꿔 다른 서버로 다시 확인 중
             self.server_status, self.server_error = status, error
             if error is not None and error.kind in CERT_KINDS and not self.settings_win:
-                self.toast("서버 인증서를 확인해야 해요. 설정 창(Ctrl+Alt+O)의 '인증·인증서'에서 확인하세요.")
+                self.toast("서버 인증서를 확인해야 해요. 설정 창(Ctrl+Alt+O)의 '인증·인증서'에서 확인하세요.", tone="warning")
             self._state_changed()
         elif cmd == "call":
             args[0](*args[1:])
+        elif cmd == "chip_restore":
+            # 칩으로 가린 입력을 기록했다: 답변 복원 창·복사 감지가 이 서버 작업으로 복원한다
+            result, tokens = args
+            self.server_work = ServerWork(result.work_id, frozenset(tokens), result.received_at)
         elif cmd == "server_decided":
             work, error = args
             if work is not None:
                 self.server_work = work
             if error:
-                self.toast(f"서버 기록에 실패했어요. {error}")
+                self.toast(f"서버 기록에 실패했어요. {error}", tone="error")
         elif cmd == "quit":
             self.quit()
 
@@ -420,9 +420,9 @@ class App:
             if state == "ready":
                 self.toast("소형 모델을 켰어요. 이름·주소 등을 더 잘 찾아요.")
             elif state == "error":
-                self.toast(f"소형 모델을 켜지 못했어요. {self.models.message}")
+                self.toast(f"소형 모델을 켜지 못했어요. {self.models.message}", tone="error")
             elif self.settings.get("model_enabled", True):
-                self.toast("모델 폴더를 먼저 지정하세요. 지금은 규칙·사전으로만 검사해요.")
+                self.toast("모델 폴더를 먼저 지정하세요. 지금은 규칙·사전으로만 검사해요.", tone="warning")
             else:
                 self.toast("소형 모델을 껐어요. 규칙·사전으로만 검사해요.")
         elif state == "error":
@@ -474,14 +474,13 @@ class App:
         self._last_seq = self._own_seq
 
     # ================================================================== 창 열기
-    def open_review(self, text: str = "", source: str = "manual", local: bool = False, selected=None,
-                    choice=None) -> None:
+    def open_review(self, text: str = "", source: str = "manual", local: bool = False, selected=None) -> None:
         """서버 처리 모드면 서버 점검 창, 아니면(또는 local=True면) 이 PC 엔진 점검 창."""
         if not text and self.reviews:  # 빈 창 요청이면 기존 창을 앞으로
             self.reviews[-1]._bring_front()
             return
         cls = ServerReviewWindow if self.server_mode() and not local else ReviewWindow
-        self.reviews.append(cls(self, text, source, selected=selected, choice=choice))
+        self.reviews.append(cls(self, text, source, selected=selected))
 
     def review_closed(self, win) -> None:
         if win in self.reviews:
@@ -530,10 +529,12 @@ class App:
         self.file_win = None
 
     # ================================================================== 알림
-    def toast(self, message: str, ms: int = 3500) -> None:
+    def toast(self, message: str, ms: int = 3500, tone: str = "success", action=None) -> None:
+        """알림: 화면 위 가운데. tone = success(완료) · warning(경고) · error(오류).
+        action=(글자, 단축키, 함수)면 버튼과 남은 시간 막대를 둔다 (되돌리기는 10초)."""
         if self._toast_win is not None:
             self._toast_win.destroy()
-        win = theme.toast(self.root, message)  # 앰버 알약, 화면 아래 가운데
+        win = theme.toast(self.root, message, ms, tone=tone, action=action)
         self._toast_win = win
         win.after(ms, lambda: self._close_toast(win))
 
@@ -550,15 +551,15 @@ class App:
             self.settings["autostart_asked"] = True
             self.save_settings()
             ok = messagebox.askyesno(
-                "KP Guard",
-                "Windows에 로그인할 때 KP Guard를 자동으로 실행할까요?\n\n"
+                theme.APP_TITLE,
+                f"Windows에 로그인할 때 {theme.APP_TITLE}를 자동으로 실행할까요?\n\n"
                 "백그라운드에서 복사한 프롬프트를 점검합니다. 설정 창에서 언제든 끌 수 있어요.",
                 parent=self.settings_win or self.root)
             if ok:
                 try:
                     autostart.enable()
                 except OSError as exc:
-                    messagebox.showerror("KP Guard", f"자동 시작 등록 실패: {exc}")
+                    messagebox.showerror(theme.APP_TITLE, f"자동 시작 등록 실패: {exc}")
             if self.settings_win:
                 self.settings_win.v_auto.set(autostart.is_enabled())
         if background and self.tray:

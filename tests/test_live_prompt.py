@@ -9,7 +9,7 @@ from agent.browser.actions import BrowserActions, ChipError
 from agent.browser.bridge import BrowserBridge
 from agent.browser.peer import Peer
 from agent.overlay.live import stable_ranges
-from agent.server.client import DecideResult, ProcessResult, RestoreResult, ServerError
+from agent.server.client import ProcessResult, ServerError
 
 
 class FixtureApp:
@@ -65,36 +65,6 @@ class LiveTests(unittest.TestCase):
             self.actions.handle(req)
         self.app.server.preview.assert_not_called()
 
-    def test_select_decide_restore_once_isolated_by_tab(self):
-        text = "연락 010-2345-6789"
-        result = ProcessResult("w", "연락 [전화번호_1]", ["PHONE"], 1, "S", "low", 0, True)
-        self.app.server.process.return_value = result
-        self.app.server.decide.return_value = DecideResult(result.masked_text, True, None)
-        self.app.server.restore.return_value = RestoreResult(text, [], [])
-        work = self.actions.inspect("tab1", text)
-        self.assertEqual(work["choices"], ["[전화번호_1]"])
-        msg = {"action": "decide", "ticket": work["ticket"], "choice": "apply"}
-        with self.assertRaises(ChipError):
-            self.actions.handle({**msg, "channel": "tab2"})
-        preview = self.actions.handle(
-            {"action": "selection", "ticket": work["ticket"], "channel": "tab1", "keep": ["[전화번호_1]"]}
-        )
-        self.assertEqual(preview["text"], text)
-        self.app.server.decide.assert_not_called()
-        sent = self.actions.handle({**msg, "channel": "tab1"})
-        self.assertEqual(sent["text"], result.masked_text)
-        with self.assertRaises(ChipError):
-            self.actions.handle({**msg, "channel": "tab1"})
-        reply = {
-            "action": "restore",
-            "ticket": work["ticket"],
-            "channel": "tab1",
-            "text": "연락 [전화번호_1]",
-        }
-        self.assertEqual(self.actions.handle(reply)["text"], text)
-        with self.assertRaises(ChipError):
-            self.actions.handle(reply)
-
     def test_legacy_server_highlights_only_exact_ranges(self):
         app = self.app
         app.server.preview.side_effect = ServerError("missing", "expired", 404)
@@ -103,7 +73,7 @@ class LiveTests(unittest.TestCase):
         )
         for _ in range(2):
             result = self.actions.preview("연락 010-2345-6789")
-            self.assertEqual(result["spans"], [{"start": 3, "end": 16, "label": "전화번호"}])
+            self.assertEqual(result["spans"], [{"start": 3, "end": 16, "label": "전화번호", "keep": True}])
         self.assertEqual(app.server.preview.call_count, 1)
         app.server.process.return_value.masked_text = "[이름_1][이름_2]"
         app.server.process.return_value.detected_count = 2

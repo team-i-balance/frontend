@@ -246,6 +246,16 @@ def _extend_delete(text: str, span: Span) -> int:
     return m.end() if m else end
 
 
+def replacement_for(it: Item, session: Session, text: str) -> str:
+    """항목 하나를 가렸을 때 넣을 값 (지우기면 ""). 칩에서 한 항목만 입력창에 바로 바꿀 때 쓴다."""
+    return "" if it.strategy == "delete" else _replacement(it, session, text)
+
+
+def delete_end(text: str, span: Span) -> int:
+    """지우기로 함께 없앨 끝 위치 (뒤에 붙은 조사·'에 사는' 같은 꼬리 포함)."""
+    return _extend_delete(text, span)
+
+
 # ====================================================================== 문장 정리
 _CLEAN_RULES = [re.compile(p, re.M) for p in (
     r"(?P<rm>\(\s*[,;·]?\s*\))",          # 빈 괄호

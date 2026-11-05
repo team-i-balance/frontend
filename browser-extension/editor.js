@@ -126,6 +126,63 @@
     return results;
   }
 
+  const codePoints = (text) => Array.from(text);
+
+  function units(text) {
+    const offsets = [0];
+    for (const char of text) offsets.push(offsets[offsets.length - 1] + char.length);
+    return offsets;
+  }
+
+  /* Replace only the given ranges, as if typed: [[start, end, text]] in code points of `before`.
+     Goes from the last range so earlier offsets stay valid, and re-reads the editor after each step. */
+  function edit(el, before, edits) {
+    if (!el.isConnected || snapshot(el).text !== before) return false;
+    el.focus();
+    let expected = before;
+    for (const [a, b, value] of [...edits].sort((x, y) => y[0] - x[0])) {
+      const snap = snapshot(el);
+      if (snap.text !== expected) return false;
+      const offsets = units(snap.text),
+        from = offsets[a],
+        to = offsets[b];
+      if (from === undefined || to === undefined || !(from < to)) return false;
+      const next = codePoints(expected);
+      next.splice(a, b - a, ...codePoints(value));
+      if (textarea(el)) {
+        el.setSelectionRange(from, to);
+        const typed = value
+          ? document.execCommand('insertText', false, value)
+          : document.execCommand('delete', false);
+        if (!typed) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          setter.call(el, next.join(''));
+          el.setSelectionRange(from + value.length, from + value.length);
+          el.dispatchEvent(
+            new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: value }),
+          );
+        }
+      } else {
+        const first = snap.nodes.find((n) => n.start <= from && from < n.end);
+        const last = snap.nodes.find((n) => n.start < to && to <= n.end);
+        if (!first || !last) return false;
+        const range = document.createRange(),
+          selection = getSelection();
+        range.setStart(first.node, from - first.start);
+        range.setEnd(last.node, to - last.start);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        // A real editing transaction updates ProseMirror / the site's model and undo stack.
+        const typed = value
+          ? document.execCommand('insertText', false, value)
+          : document.execCommand('delete', false);
+        if (!typed) return false;
+      }
+      expected = next.join('');
+    }
+    return snapshot(el).text === expected;
+  }
+
   function replace(el, before, after) {
     if (!el.isConnected || snapshot(el).text !== before) return false;
     el.focus();
@@ -163,5 +220,5 @@
     }
     return stable;
   }
-  globalThis.KPGuardEditor = { composer, snapshot, boxes, replace, stableRanges };
+  globalThis.KPGuardEditor = { composer, snapshot, boxes, edit, replace, stableRanges };
 })();

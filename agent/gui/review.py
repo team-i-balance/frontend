@@ -16,16 +16,19 @@ from tkinter import ttk
 from ..detect.pipeline import COVERAGE_LABELS, detect
 from ..detect.scoring import overall_grade
 from ..detect.span import TYPE_LABELS
-from ..sanitize.engine import ALLOWED, STRATEGY_LABELS, make_items, sanitize
+from ..sanitize.engine import ALLOWED, STRATEGY_LABELS, Item, make_items, replacement_for, sanitize
+from ..sanitize.josa import ro
 from ..system import platform_api
 from . import theme
+from .chip import Chip, ChipPanel
 
-REASONS = [("false_positive", "오탐이에요 (개인정보가 아님)"), ("business_need", "업무상 꼭 필요해요"),
-           ("approved", "승인받았어요"), ("none", "선택 안 함")]
-REASON_SHORT = {"false_positive": "오탐", "business_need": "업무상 필요", "approved": "승인받음", "none": "사유 없음"}
+# 원문유지 사유 칩 셋 (입력창 칩과 같다)
+REASONS = [("business_need", "업무상 필요"), ("false_positive", "오탐"), ("approved", "승인된 개인정보")]
+REASON_SHORT = {"false_positive": "오탐", "business_need": "업무상 필요", "approved": "승인된 개인정보",
+                "none": "사유 없음"}
 MISSED_TYPES = [("name", "이름"), ("phone", "전화번호"), ("address", "주소"), ("other", "기타")]
 HINT = "놓친 정보는 원문에서 드래그한 뒤 우클릭해 가릴 수 있어요"
-TABLE_CAPTION = "하이라이트나 행을 클릭하면 되돌리거나 변환 방식을 바꿀 수 있어요"
+TABLE_CAPTION = "하이라이트나 행을 누르면 마스킹 · 원문유지"
 
 _short = theme.short
 Tooltip = theme.Tooltip
@@ -49,7 +52,7 @@ def build_layout(win, out_title: str, cols=LOCAL_COLUMNS):
 
     win에 banner, b_title, b_detail, b_actions, orig, out, out_info, cov_info, tree, bottom, hint 를 만든다.
     """
-    gap = theme.px(16)
+    gap = theme.px(24)
     win.banner = theme.Banner(win)
     win.banner.pack(fill="x", padx=gap, pady=(gap, 0))
     win.b_title, win.b_detail, win.b_actions = win.banner.title, win.banner.detail, win.banner.actions
@@ -60,11 +63,11 @@ def build_layout(win, out_title: str, cols=LOCAL_COLUMNS):
     win.hint.pack(side="left")
 
     table = theme.Card(win, title="탐지 항목", caption=TABLE_CAPTION, fit=True)
-    table.pack(side="bottom", fill="x", padx=gap, pady=(theme.px(12), 0))
+    table.pack(side="bottom", fill="x", padx=gap, pady=(theme.px(16), 0))
     win.tree = theme.table(table.body, cols, height=3 if theme.compact(win) else 4)
 
     body = ttk.PanedWindow(win, orient="horizontal")
-    body.pack(fill="both", expand=True, padx=gap, pady=(theme.px(12), 0))
+    body.pack(fill="both", expand=True, padx=gap, pady=(theme.px(16), 0))
     left = theme.Card(body, title="원문", caption="직접 입력하거나 고칠 수 있어요")
     right = theme.Card(body, title=out_title)
     body.add(left, weight=1)
@@ -81,12 +84,11 @@ def build_layout(win, out_title: str, cols=LOCAL_COLUMNS):
 
 
 class ReviewWindow(tk.Toplevel):
-    def __init__(self, app, text: str = "", source: str = "manual", selected=None, choice=None):
+    def __init__(self, app, text: str = "", source: str = "manual", selected=None):
         super().__init__(app.root)
         self.app = app
         self.source = source
         self.overlay_selection = selected
-        self.overlay_choice = choice  # ("keep", 사유) / ("mask", None): 화면 칩에서 이미 고른 처리
         self.decisions: dict[tuple, dict] = {}
         self.manual: list[tuple[str, str]] = []
         self.ignored_types: list[str] = []
@@ -97,10 +99,10 @@ class ReviewWindow(tk.Toplevel):
         self.grade = "O"
         self._refresh_job = None
         self._pending_click = None
-        self._menu_var = tk.StringVar(self)
+        self.chip = None
         self.tip = Tooltip(self)
 
-        theme.window(self, "AI 전송 전 점검 — KP Guard", 1200, 840, 900, 640)
+        theme.window(self, f"AI 전송 전 점검 — {theme.APP_TITLE}", 1200, 840, 900, 640)
         self.protocol("WM_DELETE_WINDOW", self.on_cancel)
         self._build()
         if text:
@@ -120,9 +122,11 @@ class ReviewWindow(tk.Toplevel):
         self.btn_send = theme.Button(self.bottom, "변환문 복사", self.on_send, kind="primary")
         self.btn_send.pack(side="right")
         theme.Button(self.bottom, "취소", self.on_cancel).pack(side="right", padx=theme.px(8))
-        theme.Button(self.bottom, "원문 그대로 사용", self.on_original, kind="ghost").pack(side="right")
+        self.btn_original = theme.Button(self.bottom, "원문 그대로 사용", self.on_original, kind="ghost")
+        self.btn_original.pack(side="right")
         self.bind("<Control-Return>", lambda e: self.on_send())
-        self.bind("<Escape>", lambda e: self.on_cancel())
+        self.bind("<Escape>", lambda e: self._close_chip() if self.chip else self.on_cancel())
+        self.bind("<ButtonPress>", self._close_chip, add="+")  # 칩 밖을 누르면 칩만 닫는다
 
     def _bring_front(self) -> None:
         self.deiconify()
@@ -197,10 +201,7 @@ class ReviewWindow(tk.Toplevel):
             self._bind_tag(self.orig, tag, i)
             if self.overlay_selection == (it.span.start, it.span.end):
                 self.overlay_selection = None
-                if self.overlay_choice:
-                    self.after_idle(lambda item=it: self._apply_choice(item))
-                else:
-                    self.after_idle(lambda idx=i, start=it.span.start: theme.open_at_mark(self, start, idx))
+                self.after_idle(lambda idx=i, start=it.span.start: theme.open_at_mark(self, start, idx))
             if it.is_blocker:
                 self.orig.tag_lower(tag)  # 블록 안의 개별 항목이 위에 보이고 먼저 클릭되도록
         self.orig.tag_raise("sel")
@@ -237,12 +238,12 @@ class ReviewWindow(tk.Toplevel):
     def _state_text(self, it) -> tuple[str, str]:
         if it.is_blocker:
             if not it.applied:
-                return f"차단 해제 · {REASON_SHORT.get(it.revert_reason, '')}", "muted"
+                return f"원문유지 · {REASON_SHORT.get(it.revert_reason, '')}", "muted"
             return ("빼고 보냄" if it.strategy == "delete" else "차단"), "danger"
         if it.applied:
-            return "적용", ""
+            return "마스킹", ""
         if it.revert_reason:
-            return f"되돌림 · {REASON_SHORT[it.revert_reason]}", "muted"
+            return f"원문유지 · {REASON_SHORT[it.revert_reason]}", "muted"
         return "확인 필요", "warning"
 
     def _fill_table(self) -> None:
@@ -284,9 +285,9 @@ class ReviewWindow(tk.Toplevel):
             if suspects:
                 lines.append(f"• 확인이 필요한 항목 {suspects}건(노란 밑줄)은 아직 바꾸지 않았어요. 클릭해서 가릴 수 있어요.")
             if reverted:
-                lines.append(f"• 되돌린 항목 {reverted}건은 원문 그대로 나가요.")
+                lines.append(f"• 원문유지한 항목 {reverted}건은 원문 그대로 나가요.")
             lines += [f"• {n}" for n in self.notes]
-            lines.append("변환문을 복사해 Claude 입력창에 붙여넣으세요. AI 답변은 '답변 복원'으로 원래 값으로 바꿀 수 있어요.")
+            lines.append("변환문을 복사해 Claude Code·Codex·채팅창에 붙여넣으세요. AI 답변은 '답변 복원'으로 원래 값으로 바꿀 수 있어요.")
             self.btn_send.configure(text="변환문 복사", state="normal")
         else:
             title = "공개 · 민감정보가 보이지 않아요"
@@ -326,61 +327,114 @@ class ReviewWindow(tk.Toplevel):
         if row:
             self._open_menu(int(row), event.x_root, event.y_root)
 
-    def _reason_menu(self, parent: tk.Menu, it) -> tk.Menu:
-        sub = theme.menu(parent)
-        for code, text in REASONS:
-            sub.add_command(label=text, command=lambda c=code: self._decide(it, applied=False, reason=c))
-        return sub
+    # ------------------------------------------------------------------ 칩: 마스킹 / 원문유지
+    def _close_chip(self, _e=None) -> None:
+        if self.chip is not None:
+            self.chip.destroy()
+            self.chip = None
+
+    def _chip_at(self, x: int, y: int) -> ChipPanel:
+        self._close_chip()
+        bounds = (0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+        self.chip = ChipPanel(self, x, y + theme.px(4), bounds, below=y - theme.px(20))
+        return self.chip
+
+    def _item(self, key):
+        return next((it for it in self.items if it.span.key == key), None)
 
     def _open_menu(self, idx: int, x: int, y: int) -> None:
+        """하이라이트·행을 누르면 칩 두 개: 마스킹 / 원문유지."""
         self.tip.hide()
         if idx >= len(self.items):
             return
-        it = self.items[idx]
-        s = it.span
-        m = theme.menu(self)
-        head = f"{TYPE_LABELS[s.type]} · {_short(theme.masked(s.value), 30)}"
-        if it.applied and it.replacement:
-            head += f"  →  {it.replacement}"
-        m.add_command(label=head, state="disabled")
-        m.add_command(label=f"근거: {s.reason} (신뢰도 {s.confidence:.2f})", state="disabled")
-        m.add_separator()
+        self._chip_at(x, y)
+        self._chip_root(self.items[idx].span.key)
 
+    def _chip_root(self, key) -> None:
+        it = self._item(key)
+        if it is None or self.chip is None:
+            return self._close_chip()
+        state, _ = self._state_text(it)
+        self.chip.show(title=f"{TYPE_LABELS[it.span.type]} · {state}", chips=[
+            Chip("마스킹", lambda: self._chip_mask(key)),
+            Chip("원문유지", lambda: self._chip_reasons(key)),
+        ])
+
+    def _chip_mask(self, key, strategy: str | None = None) -> None:
+        """마스킹: 바뀔 값만 위에 보여 주고, 아래 칩으로 적용하거나 방식을 바꿔 본다."""
+        it = self._item(key)
+        if it is None or self.chip is None:
+            return self._close_chip()
         if it.is_blocker:
-            if it.applied and it.strategy == "block":
-                m.add_command(label="이 부분 빼고 보내기", command=lambda: self._decide(it, applied=True, strategy="delete"))
-                m.add_cascade(label="차단 해제하고 원문 유지 (사유 선택)", menu=self._reason_menu(m, it))
-            else:
-                m.add_command(label="다시 차단", command=lambda: self._decide(it, applied=True, strategy="block"))
+            strategy, options = "delete", []
         else:
-            if it.applied:
-                m.add_cascade(label="되돌리기 · 원문 그대로 보내기 (사유 선택)", menu=self._reason_menu(m, it))
-            else:
-                m.add_command(label="가리기 (변환 적용)", command=lambda: self._decide(it, applied=True))
-            strategies = theme.menu(m)
-            self._menu_var.set(it.strategy)
-            for st in ALLOWED[s.type]:
-                strategies.add_radiobutton(label=STRATEGY_LABELS[st], value=st, variable=self._menu_var,
-                                           command=lambda st=st: self._decide(it, applied=True, strategy=st))
-            m.add_cascade(label="변환 방식 바꾸기", menu=strategies)
-            m.add_separator()
-            m.add_command(label="이 값은 앞으로 탐지하지 않기 (오탐 등록)", command=lambda: self._ignore(it))
-        try:
-            m.tk_popup(x, y)
-        finally:
-            m.grab_release()
+            strategy = strategy or it.strategy
+            options = [st for st in ALLOWED[it.span.type] if st != strategy]
+        done = it.applied and it.strategy == strategy
+        if strategy in ("delete", "block"):
+            word, deleted = theme.masked(it.span.value), True
+        else:
+            text = self.orig.get("1.0", "end-1c")
+            word, deleted = replacement_for(Item(it.span, strategy, True), self.app.session, text), False
+        chips = [Chip("적용됨" if done else "적용", None if done else (lambda: self._chip_apply(key, strategy)))]
+        chips += [Chip(STRATEGY_LABELS[st], lambda st=st: self._chip_mask(key, st), kind="ghost") for st in options]
+        title = f"{TYPE_LABELS[it.span.type]} · 마스킹" + (f" · {STRATEGY_LABELS[strategy]}" if options else "")
+        self.chip.show(title=title, back=lambda: self._chip_root(key), word=word, deleted=deleted, chips=chips)
 
-    def _apply_choice(self, it) -> None:
-        """화면 칩에서 고른 처리를 그대로 반영하고 그 자리를 보여 준다."""
-        kind, reason = self.overlay_choice
-        self.overlay_choice = None
-        if not self.winfo_exists():
+    def _chip_apply(self, key, strategy: str) -> None:
+        it = self._item(key)
+        before = dict(self.decisions.get(key, {}))
+        self._decide(it, applied=True, strategy=strategy)
+        it = self._item(key)
+        if strategy in ("delete", "block") or it is None or not it.replacement:
+            message = "이 부분은 빼고 보내요" if it is not None and it.is_blocker else "지웠어요"
+        else:
+            message = f"{it.replacement}{ro(it.replacement)} 바꿨어요"
+        self._chip_done(key, message, lambda: self._restore_decision(key, before))
+
+    def _chip_reasons(self, key) -> None:
+        it = self._item(key)
+        if it is None or self.chip is None:
+            return self._close_chip()
+        note = "기밀로 판정된 내용이에요. 원문을 보내면 보안 검토 대상으로 기록돼요." if it.is_blocker else ""
+        self.chip.show(title=f"{TYPE_LABELS[it.span.type]} · 원문유지 사유", back=lambda: self._chip_root(key),
+                       note=note, chips=[Chip(name, lambda code=code: self._chip_keep(key, code))
+                                         for code, name in REASONS])
+
+    def _chip_keep(self, key, code: str) -> None:
+        it = self._item(key)
+        before = dict(self.decisions.get(key, {}))
+        if code == "false_positive" and not it.is_blocker:
+            self._ignore(it)  # 오탐: 이 값은 앞으로 탐지하지 않는다 (메모리)
+            undo = lambda: self._unignore(it.span)  # noqa: E731
+        else:
+            self._decide(it, applied=False, reason=code)
+            undo = lambda: self._restore_decision(key, before)  # noqa: E731
+        self._chip_done(key, f"원문을 유지해요 · {REASON_SHORT[code]}", undo)
+
+    def _chip_done(self, key, message: str, undo) -> None:
+        if self.chip is None:
             return
-        self.orig.see(theme.index(it.span.start))
-        if kind == "keep":
-            self._decide(it, applied=False, reason=reason)
-        elif not it.applied:
-            self._decide(it, applied=True)
+        label = TYPE_LABELS.get(key[0], "")
+
+        def run_undo():
+            undo()
+            self._close_chip()
+
+        self.chip.show(title=label, message=message, chips=[Chip("되돌리기", run_undo, kind="ghost", icon="undo")])
+
+    def _restore_decision(self, key, before: dict) -> None:
+        if before:
+            self.decisions[key] = before
+        else:
+            self.decisions.pop(key, None)
+        self.refresh()
+
+    def _unignore(self, span) -> None:
+        self.app.ignore.discard(span.value)
+        if span.type in self.ignored_types:
+            self.ignored_types.remove(span.type)
+        self.refresh()
 
     def _decide(self, it, **change) -> None:
         d = self.decisions.setdefault(it.span.key, {})
@@ -445,7 +499,7 @@ class ReviewWindow(tk.Toplevel):
             return
         self.app.copy_to_clipboard(self.result.text)
         self._log("sent_sanitized")
-        msg = ("변환문을 복사했어요. Claude 입력창에 붙여넣으세요 (Ctrl+V)"
+        msg = ("변환문을 복사했어요. Claude Code·Codex·채팅창에 붙여넣으세요 (Ctrl+V)"
                if self.grade == "S" else "복사했어요. 붙여넣어 사용하세요")
         self.app.toast(msg)
         self._close()
@@ -455,12 +509,20 @@ class ReviewWindow(tk.Toplevel):
         self._close()
 
     def on_original(self) -> None:
-        dlg = ReasonDialog(self, blocked=self.grade == "C")
-        self.wait_window(dlg)
-        if dlg.result is None:
-            return
+        """원문 그대로 사용: 대화상자 대신 버튼 위에 사유 칩 셋을 펼친다."""
+        btn = self.btn_original
+        panel = self._chip_at(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+        blocked = self.grade == "C"
+        note = ("기밀로 판정된 내용이에요. 외부 AI에 보내면 보안 검토 대상으로 기록돼요." if blocked
+                else "바꾸지 않은 원문을 복사해요. 원문은 기록하지 않고 유형·건수·사유만 이 PC에 남아요.")
+        panel.anchor = (btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height(), btn.winfo_rooty())
+        panel.show(title="원문 그대로 사용 · 사유", note=note, note_tone="warning" if blocked else "info",
+                   chips=[Chip(name, lambda code=code: self._send_original(code)) for code, name in REASONS])
+
+    def _send_original(self, reason: str) -> None:
+        self._close_chip()
         self.app.copy_to_clipboard(self.orig.get("1.0", "end-1c"))
-        queue = self._log("sent_original", reason=dlg.result)
+        queue = self._log("sent_original", reason=reason)
         note = " · 보안 검토 대상으로 기록됐어요" if queue in ("violation", "candidate") else ""
         self.app.toast("원문을 복사했어요" + note)
         self._close()
@@ -480,33 +542,6 @@ class ReviewWindow(tk.Toplevel):
 
     def _close(self) -> None:
         self.tip.hide()
+        self._close_chip()
         self.app.review_closed(self)
-        self.destroy()
-
-
-class ReasonDialog(theme.Dialog):
-    """원문 전송 시 사유 선택. 사유는 큐 분류에만 쓰인다."""
-
-    def __init__(self, master, blocked: bool, note: str = "원문은 기록되지 않고, 유형·건수·사유만 이 PC에 남아요."):
-        super().__init__(master, "원문 그대로 사용")
-        self.result = None
-        msg = ("기밀로 판정된 내용이에요. 외부 AI에 보내면 보안 검토 대상으로 기록돼요."
-               if blocked else "바꾸지 않은 원문을 복사해요. 이유를 알려주세요.")
-        tk.Label(self.body, text=msg, font=theme.F["body16"], bg=theme.BG_RAISED,
-                 fg=theme.TEXT_DANGER if blocked else theme.TEXT_PRIMARY, wraplength=theme.px(472),
-                 justify="left", anchor="w").pack(fill="x")
-        tk.Label(self.body, text=note, font=theme.F["label14r"], bg=theme.BG_RAISED, fg=theme.TEXT_SECONDARY,
-                 wraplength=theme.px(472), justify="left", anchor="w").pack(fill="x", pady=(theme.px(4), theme.px(12)))
-        self.var = tk.StringVar(value="none")
-        for code, text in REASONS:
-            ttk.Radiobutton(self.body, text=text, value=code, variable=self.var,
-                            style="Dialog.TRadiobutton").pack(fill="x")
-        theme.Button(self.buttons, "원문 복사", self._ok, kind="primary").pack(side="right")
-        theme.Button(self.buttons, "돌아가기", self.destroy).pack(side="right", padx=theme.px(8))
-        self.update_idletasks()
-        self.geometry(f"+{master.winfo_rootx() + theme.px(300)}+{master.winfo_rooty() + theme.px(160)}")
-        self.grab_set()
-
-    def _ok(self) -> None:
-        self.result = self.var.get()
         self.destroy()

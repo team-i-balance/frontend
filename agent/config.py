@@ -15,7 +15,8 @@ OLD_SERVER_URL = "http://13.193.207.69:8501"
 DEFAULTS = {
     "native_overlay": True,
     "monitoring": True,        # 감시 켜기/끄기 (R2)
-    "clipboard_watch": True,   # 복사한 프롬프트 자동 점검
+    # 복사한 프롬프트 자동 점검: 점검 창을 띄우므로 설정에서 직접 켤 때만 (기본은 입력창 칩으로 마무리)
+    "clipboard_watch": False,
     "autostart_asked": False,  # 첫 실행 시 자동 시작 동의를 물었는지
     "min_length": 6,           # 이보다 짧은 복사는 무시
     "model_dir": "",           # 2단계 소형 모델(AEGIS) 폴더. 비우면 기본 폴더에 모델이 있을 때만 켠다

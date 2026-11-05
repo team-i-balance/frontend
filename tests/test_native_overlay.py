@@ -47,7 +47,7 @@ class LiveTests(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         seen = []
 
-        def preview(text):
+        def preview(text, key=None):
             seen.append(text)
             if len(seen) == 1:
                 entered.set()
@@ -115,7 +115,7 @@ class LiveTests(unittest.TestCase):
         )
         overlay._mouse(frame, 25, 25, True)
         overlay._mouse(frame, 25, 25, False)
-        overlay._open.assert_called_once_with(frame, frame.marks[0], 25, 25)
+        overlay._open.assert_called_once_with(frame, frame.marks[0])
         chip = Mock()
         chip.contains.side_effect = lambda x, y: 50 <= x < 70 and 50 <= y < 70
         chip.span = (frame.key, frame.text, 0, 3)

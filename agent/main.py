@@ -27,7 +27,7 @@ def _dpi_aware() -> None:
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="KP Guard — 생성형 AI 입력정보 사전 점검 도우미")
+    parser = argparse.ArgumentParser(description="AI 누리 보안 — 생성형 AI 입력정보 사전 점검 도우미 (KP Guard)")
     parser.add_argument("--background", action="store_true", help="창 없이 트레이에 상주")
     args = parser.parse_args(argv)
 
@@ -38,7 +38,7 @@ def main(argv=None) -> None:
         root = tk.Tk()
         root.withdraw()
         if not args.background:
-            messagebox.showinfo("KP Guard", "이미 실행 중이에요. 트레이 아이콘이나 Ctrl+Alt+O로 열 수 있어요.")
+            messagebox.showinfo("AI 누리 보안", "이미 실행 중이에요. 트레이 아이콘이나 Ctrl+Alt+O로 열 수 있어요.")
         root.destroy()
         return
 

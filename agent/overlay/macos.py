@@ -1,6 +1,8 @@
 """Read the active macOS accessibility element and paint nonactivating AppKit panels."""
 
 import os
+import threading
+import time
 
 import AppKit as K
 import ApplicationServices as A
@@ -9,6 +11,11 @@ from CoreFoundation import CFHash
 
 from ..server.client import MAX_TEXT
 from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site
+
+try:
+    import Quartz as Q
+except ImportError:  # pyobjc-framework-Quartz: Enter guard and typed edits
+    Q = None
 
 BROWSERS = {
     "com.apple.safari",
@@ -144,6 +151,11 @@ class Reader:
     def reset(self):
         self.saved = None
 
+    @staticmethod
+    def focus(key):
+        """Before typing: re-activate the editor's app if a chip click activated ours."""
+        return activate(key[0])
+
     def sample(self):
         if not A.AXIsProcessTrusted():
             self.reset()
@@ -171,8 +183,10 @@ class Reader:
         if window is None:
             return None
         docs = [n for n, role in chain if role == "AXWebArea"]
+        typing = False  # Enter is guarded only while the keyboard focus is in the composer itself
         if docs:
             field = next((n for n, role in chain if is_editor(n, role)), None)
+            typing = field is not None
             if field is not None:
                 urls = [web_url(doc) for doc in docs]
                 if not all(site(url) and site(url) == site(urls[0]) for url in urls):
@@ -199,11 +213,11 @@ class Reader:
                 return None
         raw = attribute(field, "AXValue")
         if isinstance(raw, str) and len(raw) <= MAX_TEXT:
-            return self.snapshot(pid, site(url), window, field, raw, 0, Draft.plain(raw), url)
+            return self.snapshot(pid, site(url), window, field, raw, 0, Draft.plain(raw), url, typing)
         return None
 
     @staticmethod
-    def snapshot(pid, kind, window, field, raw, base, draft, url=""):
+    def snapshot(pid, kind, window, field, raw, base, draft, url="", focused=True):
         viewport = clip(boundary(field), boundary(window))
 
         offsets = None
@@ -220,7 +234,26 @@ class Reader:
                     if visible:
                         yield visible
 
-        return Snapshot((pid, kind, CFHash(window), CFHash(field), url), draft, ranges)
+        def replace(a, b, new):
+            nonlocal offsets
+            if not activate(pid):
+                return False
+            parts = list(draft.parts(a, b))
+            if len(parts) != 1:
+                return False
+            if offsets is None:
+                offsets = utf16_offsets(raw)
+            start, end = parts[0]
+            selection = ax_range(base + offsets[start], offsets[end] - offsets[start])
+            if A.AXUIElementSetAttributeValue(field, "AXSelectedTextRange", selection):
+                return False
+            time.sleep(0.03)
+            if not A.AXUIElementSetAttributeValue(field, "AXSelectedText", new):
+                return True
+            return type_text(new) if new else press(51)
+
+        bounds = viewport or ()
+        return Snapshot((pid, kind, CFHash(window), CFHash(field), url), draft, ranges, replace, bounds, focused)
 
 
 class Paint:
@@ -232,7 +265,11 @@ class Paint:
         return K.NSScreen.screens()[0].frame().size.height
 
     def draw(self, regions):
-        for i, (x, y, r, b) in enumerate(regions):
+        # Signal blue #3D7EF7: a light fill plus a 2px underline per range.
+        shapes = []
+        for x, y, r, b in regions:
+            shapes += [(x, y, r, b, 0.25), (x, max(y, b - 2), r, b, 0.92)]
+        for i, (x, y, r, b, alpha) in enumerate(shapes):
             frame = K.NSMakeRect(x, self.top() - b, r - x, b - y)
             if i == len(self.panels):
                 panel = K.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -249,13 +286,14 @@ class Paint:
                     | K.NSWindowCollectionBehaviorFullScreenAuxiliary
                 )
                 panel.setBackgroundColor_(
-                    K.NSColor.colorWithSRGBRed_green_blue_alpha_(0.965, 0.65, 0.14, 0.34)
+                    K.NSColor.colorWithSRGBRed_green_blue_alpha_(0.239, 0.494, 0.969, alpha)
                 )
                 self.panels.append(panel)
             panel = self.panels[i]
+            panel.setBackgroundColor_(K.NSColor.colorWithSRGBRed_green_blue_alpha_(0.239, 0.494, 0.969, alpha))
             panel.setFrame_display_(frame, True)
             panel.orderFrontRegardless()
-        for panel in self.panels[len(regions) :]:
+        for panel in self.panels[len(shapes) :]:
             panel.orderOut_(None)
 
     def pointer(self):
@@ -277,3 +315,124 @@ class Paint:
 
 def request_access():
     A.AXIsProcessTrustedWithOptions({A.kAXTrustedCheckOptionPrompt: True})
+
+
+def activate(pid, wait=0.5):
+    """Bring the editor's app to the front (a click on our chip activates this Python app on macOS)."""
+    front = K.NSWorkspace.sharedWorkspace().frontmostApplication()
+    if front is not None and front.processIdentifier() == pid:
+        return True
+    app = K.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+    if app is None:
+        return False
+    app.activateWithOptions_(K.NSApplicationActivateIgnoringOtherApps)
+    until = time.monotonic() + wait
+    while time.monotonic() < until:
+        front = K.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if front is not None and front.processIdentifier() == pid:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def give_back(pid):
+    """칩을 띄우며 이 앱이 앞으로 왔으면 입력창의 앱을 다시 앞으로 (기다리지 않음)."""
+    activate(pid, wait=0)
+
+
+MAGIC = 0x4B50  # kCGEventSourceUserData of our own keystrokes
+
+
+def _post(events):
+    for event in events:
+        Q.CGEventSetIntegerValueField(event, Q.kCGEventSourceUserData, MAGIC)
+        Q.CGEventPost(Q.kCGHIDEventTap, event)
+        time.sleep(0.004)
+    return True
+
+
+def type_text(text):
+    if Q is None:
+        return False
+    events = []
+    for char in text:
+        for down in (True, False):
+            event = Q.CGEventCreateKeyboardEvent(None, 0, down)
+            Q.CGEventKeyboardSetUnicodeString(event, len(char.encode("utf-16-le")) // 2, char)
+            events.append(event)
+    return _post(events)
+
+
+def press(code, times=1):
+    if Q is None:
+        return False
+    return _post([Q.CGEventCreateKeyboardEvent(None, code, down) for _ in range(times) for down in (True, False)])
+
+
+class EnterGuard:
+    """While highlights remain, drop a plain Return (send) going to that editor's app. Shift+Return still passes.
+
+    target() returns the guarded process id or None. blocked() runs on the tap thread and must only post.
+    Requires the same Accessibility permission as the highlights.
+    """
+
+    def __init__(self, target, blocked):
+        if Q is None:
+            raise OSError("Quartz unavailable")
+        self.target, self.blocked = target, blocked
+        self.tap = self.loop = None
+        self.swallowed = False
+
+    def start(self):
+        ready = threading.Event()
+
+        def run():
+            mask = Q.CGEventMaskBit(Q.kCGEventKeyDown) | Q.CGEventMaskBit(Q.kCGEventKeyUp)
+            self.tap = Q.CGEventTapCreate(Q.kCGAnnotatedSessionEventTap, Q.kCGHeadInsertEventTap,
+                                          Q.kCGEventTapOptionDefault, mask, self._handle, None)
+            if not self.tap:
+                ready.set()
+                return
+            source = Q.CFMachPortCreateRunLoopSource(None, self.tap, 0)
+            self.loop = Q.CFRunLoopGetCurrent()
+            Q.CFRunLoopAddSource(self.loop, source, Q.kCFRunLoopCommonModes)
+            Q.CGEventTapEnable(self.tap, True)
+            ready.set()
+            Q.CFRunLoopRun()
+
+        threading.Thread(target=run, daemon=True, name="enter-guard").start()
+        ready.wait(2)
+        if not self.tap:
+            raise OSError("event tap unavailable (Accessibility permission)")
+
+    def _handle(self, proxy, kind, event, refcon):
+        try:
+            if kind in (Q.kCGEventTapDisabledByTimeout, Q.kCGEventTapDisabledByUserInput):
+                Q.CGEventTapEnable(self.tap, True)
+                return event
+            if Q.CGEventGetIntegerValueField(event, Q.kCGEventSourceUserData) == MAGIC:
+                return event
+            if Q.CGEventGetIntegerValueField(event, Q.kCGKeyboardEventKeycode) not in (36, 76):
+                return event
+            if kind == Q.kCGEventKeyDown:
+                target = self.target()
+                if not target or Q.CGEventGetFlags(event) & Q.kCGEventFlagMaskShift:
+                    return event
+                pid = Q.CGEventGetIntegerValueField(event, Q.kCGEventTargetUnixProcessID)
+                if not pid:
+                    front = K.NSWorkspace.sharedWorkspace().frontmostApplication()
+                    pid = front.processIdentifier() if front is not None else 0
+                if pid == target:
+                    self.swallowed = True
+                    self.blocked()
+                    return None
+            elif kind == Q.kCGEventKeyUp and self.swallowed:
+                self.swallowed = False
+                return None
+        except Exception:
+            pass
+        return event
+
+    def stop(self):
+        if self.loop is not None:
+            Q.CFRunLoopStop(self.loop)

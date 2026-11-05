@@ -78,7 +78,11 @@ class Snapshot:
     rectangles: (
         object  # Callable(start, end) -> visible screen rectangles; called on the provider thread only.
     )
-    area: tuple | None = None  # the prompt box on screen (left, top, right, bottom), when known
+    # Callable(start, end, text) -> bool: replace draft[start:end] in the real editor as if typed.
+    # Provider thread only. The caller re-reads the editor to verify the result.
+    replace: object = None
+    bounds: tuple = ()  # visible editor rectangle (left, top, right, bottom)
+    focused: bool = True  # keyboard focus is in this editor (Enter goes to it)
 
 
 OWN_WINDOW = object()

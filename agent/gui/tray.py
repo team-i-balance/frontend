@@ -14,8 +14,9 @@ except ImportError:  # 선택 의존성
 
 from .samples import SAMPLES
 
-# 디자인 토큰의 상태색: 감시 중 = 성공(green/300), 일시정지 = 경고(amber/300), 꺼짐 = 비활성(gray/400)
-_COLORS = {"on": "#5BD38A", "paused": "#FFC55C", "off": "#6F727C"}
+# 로고 마크 '문장과 가림'(시그널 블루) + 상태 점: 감시 중 = 초록, 일시정지 = 노랑, 꺼짐 = 회색 (docs/DESIGN-SETTINGS.md)
+_COLORS = {"on": "#55DC92", "paused": "#F8C952", "off": "#868E96"}
+_MARK = ((8, 12, 56, 20), (8, 28, 20, 36), (8, 44, 44, 52), (24, 24, 56, 40))
 
 
 def available() -> bool:
@@ -25,9 +26,10 @@ def available() -> bool:
 def _image(state: str):
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.polygon([(32, 4), (58, 14), (54, 42), (32, 60), (10, 42), (6, 14)], fill=_COLORS[state])
-    d.rectangle([22, 28, 42, 46], fill="#131416")
-    d.arc([24, 16, 40, 36], 180, 360, fill="#131416", width=4)
+    d.rounded_rectangle([0, 0, 63, 63], radius=14, fill="#1E2126")
+    for x1, y1, x2, y2 in _MARK:
+        d.rectangle([x1, y1, x2 - 1, y2 - 1], fill="#3D7EF7")
+    d.ellipse([42, 42, 62, 62], fill=_COLORS[state], outline="#1E2126", width=3)
     return img
 
 
@@ -51,7 +53,7 @@ class Tray:
         self.icon = pystray.Icon("KPGuard", _image(app.state()), self._title(), menu)
 
     def _title(self) -> str:
-        return {"on": "KP Guard · 감시 중", "paused": "KP Guard · 일시정지", "off": "KP Guard · 꺼짐"}[self.app.state()]
+        return {"on": "AI 누리 보안 · 감시 중", "paused": "AI 누리 보안 · 일시정지", "off": "AI 누리 보안 · 꺼짐"}[self.app.state()]
 
     def start(self) -> None:
         threading.Thread(target=self.icon.run, daemon=True, name="tray").start()
@@ -63,7 +65,7 @@ class Tray:
 
     def notify(self, message: str) -> None:
         try:
-            self.icon.notify(message, "KP Guard")
+            self.icon.notify(message, "AI 누리 보안")
         except Exception:
             pass
 

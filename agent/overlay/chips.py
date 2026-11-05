@@ -22,16 +22,22 @@ from typing import Callable
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 # ---------------------------------------------------------------- look (independent of gui.theme)
-INK = (44, 46, 52)        # card
-EDGE = (78, 81, 90)       # 1px outline
-TEXT = (236, 237, 240)
-DIM = (150, 153, 162)
-BLUE = (59, 130, 246)     # active card, chosen row, lines
+# Values from docs/DESIGN-SETTINGS.md (AI 누리 보안).
+INK = (0x34, 0x3A, 0x40)     # 요소: card face
+EDGE = (0x59, 0x61, 0x6B)    # 선-2: 1px outline
+RULE = (0x4A, 0x51, 0x59)    # header divider
+TEXT = (0xF1, 0xF3, 0xF5)    # 본문
+DIM = (0xA3, 0xAB, 0xB4)     # 흐림
+OFF = (0x86, 0x8E, 0x96)     # 비활성
+BLUE = (0x3D, 0x7E, 0xF7)    # 표시: active chip, chosen row, lines
 LINK = BLUE
-HOVER = (56, 59, 67)
-CHOSEN = (40, 52, 76)     # blue-tinted slate
-FLASH = (52, 74, 120)
-BADGE = (108, 112, 122)   # outlined number box
+HOVER = (0x3B, 0x41, 0x48)   # 칩: hover
+CHOSEN = (0x2A, 0x36, 0x50)  # 선택 면
+FLASH = (0x42, 0x48, 0x4F)   # 누름
+BADGE = (0x59, 0x61, 0x6B)   # outlined number box
+WORD = (0x2B, 0x30, 0x35)    # 패널-2: box behind the value that will be written
+TONES = {"error": (0xFF, 0x72, 0x72), "success": (0x55, 0xDC, 0x92), "warning": (0xF8, 0xC9, 0x52),
+         "info": (0x62, 0xCA, 0xF4)}
 
 # Sizes at 96 DPI.
 HEAD, ROW, PAD, RADIUS = 42, 36, 6, 12
@@ -60,9 +66,18 @@ def approach(value, target, dt, tau):
 
 @dataclass
 class Option:
+    """One row. menu/open lead to the next chip; action is a final choice; stay runs without closing."""
+
     label: str
     action: Callable | None = None
     menu: "Menu | None" = None
+    enabled: bool = True
+    open: Callable | None = None   # open(depth) -> Menu, for a step that loads (replace() it later)
+    stay: Callable | None = None   # runs in place, e.g. retry
+
+    @property
+    def deeper(self):
+        return self.menu is not None or self.open is not None
 
 
 @dataclass
@@ -70,6 +85,7 @@ class Menu:
     title: str
     options: list
     note: str = ""
+    lines: tuple = ()  # (text, tone): tone is info/warning/error/success, or word / deleted for the new value
 
 
 # ---------------------------------------------------------------- fonts
@@ -145,12 +161,18 @@ class Card:
         self.f_row = font("regular", S(13))
         self.f_mono = font("mono", S(11))
         self.f_badge = font("mono", S(10))
+        self.f_word = font("bold", S(14))
         widest = max((self.f_row.getlength(o.label) for o in menu.options), default=0)
+        lines = max((((self.f_word if tone in ("word", "deleted") else self.f_row).getlength(text) + S(50))
+                     for text, tone in menu.lines), default=0)
         title = self.f_title.getlength(menu.title) + (self.f_mono.getlength(menu.note) + S(22) if menu.note else 0)
-        inner = max(widest + S(PAD * 2 + 12 + 34 + 34), title + S(30) + (S(26) if depth == 0 else 0))
+        inner = max(widest + S(PAD * 2 + 12 + 34 + 34), title + S(30) + (S(26) if depth == 0 else 0), lines)
         self.w = int(max(S(MIN_W), min(S(MAX_W), inner)))
         self.head, self.row, self.pad = S(HEAD), S(ROW), S(PAD)
-        self.h = self.head + self.pad * 2 + self.row * n
+        self.line_h = S(26)
+        self.lines_h = sum(S(40) if tone in ("word", "deleted") else self.line_h for _, tone in menu.lines)
+        self.lines_h += self.pad if menu.lines else 0
+        self.h = self.head + self.pad * 2 + self.lines_h + self.row * n
         self.margin = S(SHADOW)
         self.base = self._base()
         self.base_active = self._outlined(self.base)
@@ -165,7 +187,7 @@ class Card:
     def row_box(self, i, x=None, y=None):
         x = self.tx if x is None else x
         y = self.ty if y is None else y
-        top = y + self.head + self.pad + self.row * i
+        top = y + self.head + self.pad + self.lines_h + self.row * i
         return x + self.pad, top, x + self.w - self.pad, top + self.row
 
     def close_box(self, x=None, y=None):
@@ -187,7 +209,7 @@ class Card:
         body = Image.new("RGBA", (w, h), EDGE + (255,))
         inner = rounded_mask((w - 2, h - 2), S(RADIUS) - 1)
         body.paste(INK + (255,), (1, 1), inner)
-        ImageDraw.Draw(body).line([(S(12), self.head), (w - S(12), self.head)], fill=EDGE + (255,), width=1)
+        ImageDraw.Draw(body).line([(S(12), self.head), (w - S(12), self.head)], fill=RULE + (255,), width=1)
         body.putalpha(mask)
         img.alpha_composite(body, (m, m))
         d = ImageDraw.Draw(img)
@@ -206,6 +228,26 @@ class Card:
                 )
                 img.alpha_composite(pill, (int(nx), ty - pill.height // 2))
                 d.text((nx + S(8), ty), note, font=face, fill=DIM + (255,), anchor="lm")
+        y = m + self.head + self.pad
+        for text, tone in self.menu.lines:
+            if tone in ("word", "deleted"):
+                box = (m + S(12), y + S(4), m + w - S(12), y + S(34))
+                d.rounded_rectangle(box, S(8), fill=WORD + (255,))
+                value = fit(text, self.f_word, box[2] - box[0] - S(24))
+                d.text((box[0] + S(12), (box[1] + box[3]) // 2), value, font=self.f_word,
+                       fill=(DIM if tone == "deleted" else TEXT) + (255,), anchor="lm")
+                if tone == "deleted":
+                    cy = (box[1] + box[3]) // 2
+                    d.line([(box[0] + S(12), cy), (box[0] + S(12) + self.f_word.getlength(value), cy)],
+                           fill=DIM + (255,), width=max(1, S(1)))
+                y += S(40)
+            else:
+                color = TONES.get(tone, DIM)
+                cy = y + self.line_h // 2
+                d.ellipse((m + S(16), cy - S(3), m + S(22), cy + S(3)), fill=color + (255,))
+                d.text((m + S(30), cy), fit(text, self.f_row, w - S(44)), font=self.f_row,
+                       fill=(TEXT if tone in TONES else DIM) + (255,), anchor="lm")
+                y += self.line_h
         return img
 
     def _outlined(self, base):
@@ -242,6 +284,7 @@ class Card:
             x0, y0, x1, y1 = self.row_box(i, m, m)
             slide = round((1 - appear) * S(10))
             chosen = 1.0 if self.selected == i else 0.0
+            off = not option.enabled
             lit = max(self.hover[i], chosen)
             fill = mix(INK, HOVER, self.hover[i])
             fill = mix(fill, CHOSEN, chosen)
@@ -269,11 +312,11 @@ class Card:
                 anchor="mm",
             )
             label = fit(option.label, self.f_row, x1 - bx - S(34 + 30))
-            color = mix(mix(TEXT, (255, 255, 255), lit), INK, 1 - appear)
+            color = mix(OFF if off else mix(TEXT, (255, 255, 255), lit), INK, 1 - appear)
             d.text((bx + S(34), cy), label, font=self.f_row, fill=color + (255,), anchor="lm")
             gx = x1 - S(16) + round(S(3) * self.hover[i]) + slide
             glyph = mix(INK, mix(DIM, BLUE if chosen else TEXT, lit), appear) + (255,)
-            if option.menu is not None:  # opens another chip
+            if option.deeper:  # opens another chip
                 d.line([(gx - S(3), cy - S(5)), (gx + S(2), cy), (gx - S(3), cy + S(5))], fill=glyph, width=S(2), joint="curve")
             else:  # final choice
                 d.line([(gx + S(3), cy - S(5)), (gx + S(3), cy + S(1)), (gx - S(6), cy + S(1))], fill=glyph, width=S(2), joint="curve")
@@ -291,8 +334,10 @@ class Card:
 
 # ---------------------------------------------------------------- the whole cascade
 class Cascade:
-    def __init__(self, menu, anchor, area, screen, scale, surface=None, now=None):
+    def __init__(self, menu, anchor, area, screen, scale, surface=None, now=None, ring=True):
         self.s = scale
+        self.ring = ring
+        self.on_finished = None  # on_finished(cascade, action) once the closing animation ended
         self.anchor = tuple(anchor)
         self.area = tuple(area) if area else None
         self.screen = tuple(screen)
@@ -301,7 +346,7 @@ class Cascade:
         self.clock = self.opened
         self.cards: list[Card] = []
         self.leaving: list[Card] = []
-        self.press = None
+        self.held = None  # the row under a mouse press
         self.pointer = (-10_000, -10_000)
         self.closing = None
         self.pending = None
@@ -397,12 +442,12 @@ class Cascade:
         self.pointer = (x, y)
 
     def press_at(self, x, y):
-        self.press = self._hit(x, y)
-        if self.press and self.press[0] == "row":
-            self.cards[self.press[1]].flash[self.press[2]] = 0.7
+        self.held = self._hit(x, y)
+        if self.held and self.held[0] == "row":
+            self.cards[self.held[1]].flash[self.held[2]] = 0.7
 
     def release_at(self, x, y):
-        hit, pressed, self.press = self._hit(x, y), self.press, None
+        hit, pressed, self.held = self._hit(x, y), self.held, None
         if hit is None or hit != pressed:
             return
         if hit[0] == "close":
@@ -419,18 +464,65 @@ class Cascade:
         now = self.clock if now is None else now
         card = self.cards[ci]
         option = card.menu.options[ri]
+        if not option.enabled or self.closing is not None:
+            return
         card.flash[ri] = 1.0
-        if option.menu is not None and card.selected == ri and len(self.cards) > ci + 1:
+        if option.stay is not None:
+            option.stay()
+            return
+        if option.deeper and card.selected == ri and len(self.cards) > ci + 1:
             return
         for gone in self.cards[ci + 1 :]:
             gone.dying = now
             self.leaving.append(gone)
         del self.cards[ci + 1 :]
         card.selected = ri
-        if option.menu is not None:
-            self._push(option.menu, now)
+        if option.deeper:
+            self._push(option.menu if option.menu is not None else option.open(ci + 1), now)
         else:
             self.finish(option.action, now)
+
+    def replace(self, depth, menu, now=None):
+        """Swap the chip at depth for new content (a step that finished loading). Later chips go."""
+        if self.closing is not None or depth >= len(self.cards):
+            return
+        now = self.clock if now is None else now
+        old = self.cards[depth]
+        for gone in self.cards[depth + 1 :]:
+            gone.dying = now
+            self.leaving.append(gone)
+        card = Card(menu, self.s, depth, now - 0.06)
+        card.x, card.y = old.x, old.y
+        self.cards[depth : depth + 1] = [card]
+        del self.cards[depth + 1 :]
+        self._layout()
+
+    def exists(self):
+        return self.closing is None and not self.finished
+
+    # ------------------------------------------------------------ test and keyboard-free access
+    def chip_labels(self):
+        """Labels that can be chosen on the chip waiting for a choice (the newest one)."""
+        if not self.cards or self.closing is not None:
+            return []
+        return [o.label for o in self.cards[-1].menu.options if o.enabled]
+
+    def texts(self):
+        out = []
+        for card in self.cards:
+            out += [card.menu.title, card.menu.note] + [t for t, _ in card.menu.lines]
+            out += [o.label for o in card.menu.options]
+        return [t for t in out if t]
+
+    def press(self, label):
+        """Choose the row with this label on the newest chip and skip the animations."""
+        ci = len(self.cards) - 1
+        ri = [o.label for o in self.cards[ci].menu.options].index(label)
+        self.choose(ci, ri)
+        if self.closing is not None:
+            action = self.step(self.closing + CLOSE_S + 0.1)
+            if action is not None and self.on_finished is not None:
+                self.on_finished(self, action)
 
     def finish(self, action=None, now=None):
         if self.closing is None:
@@ -456,7 +548,7 @@ class Cascade:
             card.y = round(approach(card.y, card.ty, dt, 0.07))
             live = ci < len(self.cards)
             for ri in range(len(card.hover)):
-                over = live and hit == ("row", ci, ri)
+                over = live and hit == ("row", ci, ri) and card.menu.options[ri].enabled
                 card.hover[ri] = approach(card.hover[ri], 1.0 if over else 0.0, dt, 0.05)
                 card.flash[ri] = approach(card.flash[ri], 0.0, dt, 0.12)
             card.close_hover = approach(card.close_hover, 1.0 if live and hit == ("close",) else 0.0, dt, 0.05)
@@ -497,9 +589,10 @@ class Cascade:
         d = ImageDraw.Draw(vec)
         # The word: a ring, and a ripple when the chip opens.
         ring = self._pad(self.anchor, S(4))
-        d.rounded_rectangle(self._shift(ring, left, top), S(6), outline=LINK + (255,), width=S(2))
+        if self.ring:
+            d.rounded_rectangle(self._shift(ring, left, top), S(6), outline=LINK + (255,), width=S(2))
         ripple = (now - self.opened) / 0.7
-        if 0 <= ripple < 1:
+        if self.ring and 0 <= ripple < 1:
             p = ease(ripple)
             d.rounded_rectangle(
                 self._shift(self._pad(self.anchor, S(4) + round(S(12) * p)), left, top),
