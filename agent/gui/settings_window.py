@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 
 from .. import config
 from ..events.log import QUEUE_LABELS
@@ -57,8 +57,7 @@ class SettingsWindow(tk.Toplevel):
         theme.Button(bottom, "매핑 초기화", self._reset_mapping, kind="ghost", size="sm").pack(side="left")
         theme.Button(bottom, f"{theme.APP_TITLE} 종료", lambda: app.post("quit"), kind="danger", size="sm").pack(side="right")
 
-        cols = tk.Frame(self, bg=theme.BG_CANVAS)
-        cols.pack(fill="both", expand=True, padx=gap, pady=(px(16), 0))
+        cols = self._scroll_area(gap)
         col1, col2, col3 = (tk.Frame(cols, bg=theme.BG_CANVAS) for _ in range(3))
         for i, col in enumerate((col1, col2, col3)):
             col.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else px(8), 0 if i == 2 else px(8)))
@@ -290,6 +289,60 @@ class SettingsWindow(tk.Toplevel):
         if self.app.server is None:
             self.app.toast("서버 주소는 https://주소[:포트] 형식으로 적어 주세요", tone="warning")
         self.refresh()
+
+    def _scroll_area(self, gap: int) -> tk.Frame:
+        """세 열을 담는 세로 스크롤 영역. 창보다 길 때만 스크롤 막대가 보이고 마우스 휠로 움직인다."""
+        area = tk.Frame(self, bg=theme.BG_CANVAS)
+        area.pack(fill="both", expand=True, padx=(gap, theme.px(8)), pady=(theme.px(16), 0))
+        canvas = tk.Canvas(area, bg=theme.BG_CANVAS, highlightthickness=0, bd=0)
+        bar = ttk.Scrollbar(area, orient="vertical", command=canvas.yview, style="Vertical.TScrollbar")
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side="left", fill="both", expand=True, padx=(0, theme.px(8)))
+        cols = tk.Frame(canvas, bg=theme.BG_CANVAS)
+        item = canvas.create_window(0, 0, window=cols, anchor="nw")
+
+        last = [None]
+
+        def fit(_event=None) -> None:
+            need, height, width = cols.winfo_reqheight(), canvas.winfo_height(), canvas.winfo_width()
+            if (need, height, width) == last[0]:
+                return  # 바뀐 게 없으면 아무것도 하지 않는다 (<Configure>가 다시 불리는 고리를 막음)
+            last[0] = (need, height, width)
+            canvas.itemconfigure(item, width=width, height=max(height, need))
+            canvas.configure(scrollregion=(0, 0, width, max(height, need)))
+            # 막대를 보이면 열이 좁아져 높이가 조금 바뀐다: 숨길 때는 여유를 두어 깜박이지 않게
+            if need > height + 1 and not bar.winfo_ismapped():
+                bar.pack(side="right", fill="y")
+            elif need < height - theme.px(24) and bar.winfo_ismapped():
+                bar.pack_forget()
+                canvas.yview_moveto(0)
+
+        cols.bind("<Configure>", fit)
+        canvas.bind("<Configure>", fit)
+
+        def watch() -> None:  # 상태 문구·줄바꿈으로 열 높이가 바뀌어도 <Configure>가 안 올 수 있다
+            if self.winfo_exists():
+                fit()
+                self.after(250, watch)
+
+        self.after(100, watch)
+
+        def wheel(event) -> None:
+            try:  # bind_all은 창을 닫아도 남는다: 이 창 안의 휠만, 닫힌 뒤에는 무시
+                if not self.winfo_exists() or event.widget.winfo_toplevel() is not self or not bar.winfo_ismapped():
+                    return
+            except (tk.TclError, AttributeError):
+                return
+            if getattr(event, "num", None) in (4, 5):
+                step = -1 if event.num == 4 else 1
+            else:
+                step = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(step * 3, "units")
+
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(seq, wheel, add="+")
+        self.canvas_scroll = canvas
+        return cols
 
     def _save_person(self) -> None:
         self.app.settings["user_id"] = self.v_user.get().strip()[:64]
