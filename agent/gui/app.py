@@ -21,7 +21,11 @@ from ..sanitize.engine import Session
 from ..sanitize.restore import restore
 from ..server.client import WORK_TTL_SECONDS, ServerClient, ServerError
 from ..system import autostart, platform_api
-from . import theme, tray
+from . import theme
+if sys.platform == "darwin":
+    from . import mac_tray as tray
+else:
+    from . import tray
 from .file_window import FileWindow
 from .restore_window import RestoreWindow
 from .review import ReviewWindow
