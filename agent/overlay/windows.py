@@ -9,11 +9,10 @@ from collections import deque
 from ctypes import wintypes as W
 
 import uiautomation as u
-from comtypes import COMError
 from comtypes.client import CreateObject, GetModule
 
 from ..server.client import MAX_TEXT
-from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, end_only, site, terminal_draft
+from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site
 
 user = C.WinDLL("user32", use_last_error=True)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -43,7 +42,6 @@ BROWSERS = {
     "opera.exe",
     "arc.exe",
 }
-TERMINALS = {"windowsterminal.exe", "openconsole.exe", "conhost.exe"}
 
 
 def executable(pid):
@@ -132,7 +130,7 @@ def editor_range(field, doc):
     return None
 
 
-def exact_range(text_range, raw, a, b, console=False):
+def exact_range(text_range, raw, a, b):
     """UIA text units need not match Python code points (emoji, CRLF). Verify the exact occurrence."""
     rest = text_range.Clone()
     needle = raw[a:b]
@@ -152,11 +150,7 @@ def exact_range(text_range, raw, a, b, console=False):
             if raw.count(needle) > 1:
                 prefix = text_range.Clone()
                 prefix.MoveEndpointByRange(1, match, 0, 0)
-                actual, wanted = prefix.GetText(-1), raw[:a]
-                # Console providers trim padding at the end of a clipped range.
-                if console:
-                    actual, wanted = actual.rstrip(), wanted.rstrip()
-                if actual != wanted:
+                if prefix.GetText(-1) != raw[:a]:
                     return None
             return match
         cursor = expected + len(needle)
@@ -164,8 +158,8 @@ def exact_range(text_range, raw, a, b, console=False):
     return None
 
 
-def boxes(text_range, raw, a, b, console=False):
-    match = exact_range(text_range, raw, a, b, console)
+def boxes(text_range, raw, a, b):
+    match = exact_range(text_range, raw, a, b)
     return [rect(r) for r in match.GetBoundingRectangles()] if match else []
 
 
@@ -252,42 +246,6 @@ def no_activate(window):
     put(hwnd, -20, get(hwnd, -20) | 0x08000000 | 0x00000080)
 
 
-def console_line_boxes(view, raw, a, b):
-    # Some console providers only implement character bounds within individual visual line ranges.
-    # Move by native lines first: UIA character units count padded cells differently from GetText.
-    rows = raw.splitlines(keepends=True)
-    offset = 0
-    for number, row in enumerate(rows):
-        if offset <= a < offset + len(row):
-            break
-        offset += len(row)
-    else:
-        return []
-    line = view.Clone()
-    line.MoveEndpointByRange(1, line, 0, 0)
-    if number and line.MoveEndpointByUnit(1, u.TextUnit.Line, number, 0) != number:
-        return []
-    line.MoveEndpointByRange(0, line, 1, 0)
-    line.ExpandToEnclosingUnit(u.TextUnit.Line, 0)
-    text = line.GetText(-1)
-    if text.rstrip() != row.rstrip():
-        return []
-    start, end = a - offset, b - offset
-    if end > len(text):
-        return []
-    try:
-        result = boxes(line, text, start, end, console=True)
-    except (OSError, COMError):
-        result = []
-    if result:
-        return result
-    line.MoveEndpointByRange(1, line, 0, 0)
-    line.MoveEndpointByUnit(1, u.TextUnit.Character, start, 0)
-    line.MoveEndpointByRange(0, line, 1, 0)
-    line.MoveEndpointByUnit(1, u.TextUnit.Character, end - start, 0)
-    return [rect(r) for r in line.GetBoundingRectangles()] if line.GetText(-1) == raw[a:b] else []
-
-
 class Reader:
     def __enter__(self):
         self.com = u.UIAutomationInitializerInThread()
@@ -370,35 +328,11 @@ class Reader:
         if pid.value == os.getpid():
             return OWN_WINDOW
         exe = executable(pid.value)
-        if exe not in BROWSERS | TERMINALS:
+        if exe not in BROWSERS:
             return None
         focused = u.GetFocusedControl()
         top = focused.GetTopLevelControl() if focused else None
         lineage = list(ancestry(focused)) if top and top.NativeWindowHandle == hwnd else []
-        if exe in TERMINALS:
-            self.reset()
-            for field in lineage:
-                if field.ControlTypeName not in (
-                    "TextControl",
-                    "DocumentControl",
-                    "EditControl",
-                    "PaneControl",
-                ):
-                    continue
-                pattern = field.GetPattern(u.PatternId.TextPattern)
-                if pattern:
-                    visible = pattern.GetVisibleRanges()
-                    if not visible:
-                        continue
-                    # Console providers may expose the viewport as one range per visible row.
-                    view = visible[0].Clone()
-                    view.MoveEndpointByRange(1, visible[-1], 1, 0)
-                    raw = view.GetText(100001)
-                    draft = terminal_draft(raw, u.GetWindowText(hwnd))
-                    if draft is not None:
-                        return self.snapshot(hwnd, "cli", field, view, raw, draft)
-            return None
-
         docs = [n for n in lineage if n.ControlTypeName == "DocumentControl"]
         in_focus = bool(docs)  # the keyboard focus is inside the page (not the address bar or other chrome)
         # After clicking page chrome the focused UIA element often belongs to the address bar.
@@ -444,22 +378,10 @@ class Reader:
     @staticmethod
     def snapshot(hwnd, kind, field, view, raw, draft, url="", focused=True):
         viewport = rect(field.BoundingRectangle)
-        if kind == "cli" and (viewport[2] <= viewport[0] or viewport[3] <= viewport[1]):
-            area = W.RECT()
-            api(user, "GetWindowRect", W.BOOL, W.HWND, C.POINTER(W.RECT))(hwnd, C.byref(area))
-            viewport = rect(area)
 
         def ranges(a, b):
             for start, end in draft.parts(a, b):
-                try:
-                    regions = boxes(view, raw, start, end, console=kind == "cli")
-                except (OSError, COMError):
-                    if kind != "cli":
-                        raise
-                    regions = []
-                if kind == "cli" and not regions:
-                    regions = console_line_boxes(view, raw, start, end)
-                for region in regions:
+                for region in boxes(view, raw, start, end):
                     visible = clip(region, viewport)
                     if visible:
                         yield visible
@@ -467,12 +389,6 @@ class Reader:
         def replace(a, b, new):
             if foreground() != hwnd and not bring_to_front(hwnd):
                 return False
-            if kind == "cli":
-                # A TUI owns its caret. Retype only the value at the end of the prompt.
-                if not end_only(draft, a, b):
-                    return False
-                tail = draft.text[a:]
-                return press(0x08, len(tail)) and type_text(new)  # VK_BACK
             parts = list(draft.parts(a, b))
             if len(parts) != 1:
                 return False
@@ -571,6 +487,10 @@ class Paint:
         for hwnd in self.handles[len(shapes) :]:
             self.show(hwnd, 0)
 
+    @staticmethod
+    def chip_surface():
+        return ChipSurface()
+
     def pointer(self):
         point = W.POINT()
         user.GetCursorPos(C.byref(point))
@@ -591,6 +511,121 @@ class Paint:
             self.destroy(hwnd)
         api(user, "UnregisterClassW", W.BOOL, W.LPCWSTR, W.HINSTANCE)(self.name, self.instance)
         api(gdi, "DeleteObject", W.BOOL, W.HANDLE)(self.brush)
+
+
+class BITMAPINFOHEADER(C.Structure):
+    _fields_ = [
+        ("size", W.DWORD),
+        ("width", W.LONG),
+        ("height", W.LONG),
+        ("planes", W.WORD),
+        ("bits", W.WORD),
+        ("compression", W.DWORD),
+        ("image", W.DWORD),
+        ("xppm", W.LONG),
+        ("yppm", W.LONG),
+        ("used", W.DWORD),
+        ("important", W.DWORD),
+    ]
+
+
+class BLENDFUNCTION(C.Structure):
+    _fields_ = [("op", C.c_ubyte), ("flags", C.c_ubyte), ("alpha", C.c_ubyte), ("format", C.c_ubyte)]
+
+
+class ChipSurface:
+    """A per-pixel-alpha window for the chips. It takes clicks (so the page below never gets them)
+    but never becomes the foreground window, so the browser keeps the caret in the prompt."""
+
+    NAME = "KPGuardChip"
+    registered = False
+
+    def __init__(self):
+        self.instance = api(kernel, "GetModuleHandleW", W.HMODULE, W.LPCWSTR)(None)
+        if not ChipSurface.registered:
+            hand = api(user, "LoadCursorW", W.HANDLE, W.HINSTANCE, C.c_void_p)(None, C.c_void_p(32649))
+            wc = WNDCLASS(
+                proc=C.cast(user.DefWindowProcW, C.c_void_p), instance=self.instance, cursor=hand, name=self.NAME
+            )
+            if not api(user, "RegisterClassW", W.ATOM, C.POINTER(WNDCLASS))(C.byref(wc)):
+                error = C.get_last_error()
+                if error != 1410:  # already registered
+                    raise C.WinError(error)
+            ChipSurface.registered = True
+        create = api(
+            user,
+            "CreateWindowExW",
+            W.HWND,
+            W.DWORD,
+            W.LPCWSTR,
+            W.LPCWSTR,
+            W.DWORD,
+            C.c_int,
+            C.c_int,
+            C.c_int,
+            C.c_int,
+            W.HWND,
+            W.HMENU,
+            W.HINSTANCE,
+            C.c_void_p,
+        )
+        # WS_EX_LAYERED | TOOLWINDOW | NOACTIVATE | TOPMOST, WS_POPUP. Not TRANSPARENT: it takes clicks.
+        self.hwnd = create(0x08080088, self.NAME, "", 0x80000000, 0, 0, 1, 1, None, None, self.instance, None)
+        if not self.hwnd:
+            raise C.WinError(C.get_last_error())
+        self.screen = api(user, "GetDC", W.HDC, W.HWND)(None)
+        self.dc = api(gdi, "CreateCompatibleDC", W.HDC, W.HDC)(self.screen)
+        self.section = api(
+            gdi, "CreateDIBSection", W.HBITMAP, W.HDC, C.c_void_p, W.UINT, C.POINTER(C.c_void_p), W.HANDLE, W.DWORD
+        )
+        self.select = api(gdi, "SelectObject", W.HGDIOBJ, W.HDC, W.HGDIOBJ)
+        self.delete = api(gdi, "DeleteObject", W.BOOL, W.HGDIOBJ)
+        self.update = api(
+            user,
+            "UpdateLayeredWindow",
+            W.BOOL,
+            W.HWND,
+            W.HDC,
+            C.POINTER(W.POINT),
+            C.POINTER(W.SIZE),
+            W.HDC,
+            C.POINTER(W.POINT),
+            W.DWORD,
+            C.POINTER(BLENDFUNCTION),
+            W.DWORD,
+        )
+        self.move = api(user, "SetWindowPos", W.BOOL, W.HWND, W.HWND, C.c_int, C.c_int, C.c_int, C.c_int, W.UINT)
+        self.bitmap, self.bits, self.size, self.shown = None, C.c_void_p(), (0, 0), False
+
+    def present(self, image, x, y, alpha=255):
+        w, h = image.size
+        if (w, h) != self.size:
+            info = BITMAPINFOHEADER(C.sizeof(BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+            bits = C.c_void_p()
+            bitmap = self.section(self.dc, C.byref(info), 0, C.byref(bits), None, 0)
+            if not bitmap:
+                raise C.WinError(C.get_last_error())
+            self.select(self.dc, bitmap)
+            if self.bitmap:
+                self.delete(self.bitmap)
+            self.bitmap, self.bits, self.size = bitmap, bits, (w, h)
+        data = image.convert("RGBa").tobytes("raw", "BGRa")
+        C.memmove(self.bits, data, len(data))
+        blend = BLENDFUNCTION(0, 0, max(0, min(255, alpha)), 1)
+        self.update(
+            self.hwnd, self.screen, C.byref(W.POINT(x, y)), C.byref(W.SIZE(w, h)), self.dc,
+            C.byref(W.POINT(0, 0)), 0, C.byref(blend), 2,
+        )
+        # Stay above the word marks (also topmost) without taking focus.
+        self.move(self.hwnd, -1, 0, 0, 0, 0, 0x0013 | (0 if self.shown else 0x0040))
+        self.shown = True
+
+    def close(self):
+        api(user, "DestroyWindow", W.BOOL, W.HWND)(self.hwnd)
+        api(gdi, "DeleteDC", W.BOOL, W.HDC)(self.dc)
+        if self.bitmap:
+            self.delete(self.bitmap)
+        api(user, "ReleaseDC", C.c_int, W.HWND, W.HDC)(None, self.screen)
 
 
 class KBDLLHOOKSTRUCT(C.Structure):

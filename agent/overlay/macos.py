@@ -10,7 +10,7 @@ import objc
 from CoreFoundation import CFHash
 
 from ..server.client import MAX_TEXT
-from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, end_only, site, terminal_draft
+from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site
 
 try:
     import Quartz as Q
@@ -30,7 +30,6 @@ BROWSERS = {
     "com.vivaldi.vivaldi",
     "com.operasoftware.opera",
 }
-TERMINALS = {"com.apple.terminal", "com.googlecode.iterm2"}
 
 
 def attribute(element, name):
@@ -167,14 +166,14 @@ class Reader:
         pid, bundle = app.processIdentifier(), str(app.bundleIdentifier()).lower()
         if pid == os.getpid():
             return OWN_WINDOW
-        if bundle not in BROWSERS | TERMINALS:
+        if bundle not in BROWSERS:
             self.reset()
             return None
         if pid != self.current_pid:
             self.reset()
             self.current_pid, self.app = pid, A.AXUIElementCreateApplication(pid)
             A.AXUIElementSetMessagingTimeout(self.app, 0.3)
-            if bundle in BROWSERS and not bundle.startswith(("com.apple.", "org.mozilla.")):
+            if not bundle.startswith(("com.apple.", "org.mozilla.")):
                 A.AXUIElementSetAttributeValue(self.app, "AXManualAccessibility", True)
         focus = attribute(self.app, "AXFocusedUIElement")
         if focus is None:
@@ -183,22 +182,6 @@ class Reader:
         window = attribute(self.app, "AXFocusedWindow")
         if window is None:
             return None
-        if bundle in TERMINALS:
-            self.reset()
-            field = next((n for n, role in chain if role == "AXTextArea"), None)
-            if field is None:
-                return None
-            visible = unpack(attribute(field, "AXVisibleCharacterRange"), A.kAXValueCFRangeType)
-            if visible is None or not 0 < visible[1] <= 100_000:
-                return None
-            raw = parameter(field, "AXStringForRange", ax_range(visible[0], visible[1]))
-            if not isinstance(raw, str):
-                return None
-            draft = terminal_draft(raw, attribute(window, "AXTitle") or "")
-            if draft is not None:
-                return self.snapshot(pid, "cli", window, field, raw, visible[0], draft)
-            return None
-
         docs = [n for n, role in chain if role == "AXWebArea"]
         typing = False  # Enter is guarded only while the keyboard focus is in the composer itself
         if docs:
@@ -255,11 +238,6 @@ class Reader:
             nonlocal offsets
             if not activate(pid):
                 return False
-            if kind == "cli":
-                # A TUI owns its caret. Retype only the value at the end of the prompt.
-                if not end_only(draft, a, b):
-                    return False
-                return press(51, len(draft.text[a:])) and type_text(new)  # kVK_Delete (Backspace)
             parts = list(draft.parts(a, b))
             if len(parts) != 1:
                 return False

@@ -1,9 +1,10 @@
 """원래 입력창 오버레이: 하이라이트·칩·Enter 막기. 손쉬운 사용(UIA/AX)과 네트워크는 Tk 메인 스레드 밖에서 한다.
 
-칩 흐름 (별도 창 없이 칩을 펼쳐 마무리):
+칩 흐름 (별도 창 없이 칩을 펼쳐 마무리). 칩은 단계형(chips.Cascade): 고른 칩 옆에 다음 칩이 열리고 앞 칩은 남는다.
   하이라이트 클릭 → 마스킹 / 원문유지
-    마스킹 → 바뀔 값만 보여 주고 적용 / 모두 적용 → 입력창의 그 자리만 바꾼다 → 끝(다음 항목·되돌리기)
-    원문유지 → 업무상 필요 / 오탐 / 승인된 개인정보 → 끝(다음 항목·되돌리기)
+    마스킹 → 바뀔 값만 보여 주고 적용 / 모두 적용 → (칩이 모두 닫힌 뒤) 입력창의 그 자리만 바꾼다
+    원문유지 → 업무상 필요 / 오탐 / 승인된 개인정보
+  최종 선택 뒤에는 결과 칩 하나(다음 항목 · 되돌리기)가 뜬다.
   하이라이트가 남아 있으면 그 입력창의 Enter(전송)를 막고 첫 항목의 칩을 연다.
 """
 
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 
 from ..browser.actions import KEEP_REASONS, ChipError
 from ..sanitize.josa import ro as _ro
-from ..gui.chip import Chip, ChipPanel
+from .chips import Cascade, Menu, Option, TkSurface
 from ..server.client import ServerError
 from .live import LiveRanges
 from .source import OWN_WINDOW
@@ -70,7 +71,8 @@ class NativeOverlay:
         self.stop = threading.Event()
         self.live = LiveRanges(self._preview)
         self.frame = self.shown = Frame()
-        self.chip = None          # ChipPanel
+        self.chip = None          # chips.Cascade
+        self.fading = []          # cascades playing their closing animation
         self.chip_text = None     # 칩이 가리키는 (key, text). 글이 바뀌면 그 칩은 닫는다 (끝 단계는 None)
         self.target = None        # Enter를 막을 입력창 (Windows hwnd / macOS pid). 하이라이트가 없으면 None
         self.edits = queue.Queue()
@@ -222,61 +224,119 @@ class NativeOverlay:
                 if frame.marks != self.shown.marks:
                     self.paint.draw([m.bounds for m in frame.marks])
                 self.shown = frame
-            if self.chip is not None and not self.chip.exists():
-                self.chip = None
             if frame.marks or self.chip or self.pressed:
                 self._mouse(frame, *self.paint.pointer())
+            self._animate()
         finally:
             if not self.stop.is_set():
-                self.timer = self.app.root.after(16 if self.shown.marks or self.chip else 50, self._tick)
+                busy = self.shown.marks or self.chip or self.fading
+                self.timer = self.app.root.after(16 if busy else 50, self._tick)
+
+    def _animate(self):
+        for cascade in [c for c in (self.chip, *self.fading) if c is not None]:
+            action = cascade.step()
+            if action is not None:
+                self._finished(cascade, action)
+                continue
+            try:
+                cascade.present()
+            except Exception:  # a window that cannot be drawn is removed without running anything
+                self._finished(cascade, None)
+
+    def _finished(self, cascade, action):
+        """The closing animation ended: remove the chips, then run the final choice."""
+        if cascade is self.chip:
+            self.chip, self.chip_text = None, None
+        if cascade in self.fading:
+            self.fading.remove(cascade)
+        try:
+            cascade.surface.close()
+        except Exception:
+            pass
+        if action is not None and self.enabled():
+            action()
 
     def _mouse(self, frame, x, y, down):
+        if self.chip:
+            self.chip.move(x, y)
         if down and not self.pressed:
+            mark = None
             if self.chip:
                 if self.chip.contains(x, y):
                     self.press_at = None
                     self.pressed = True
+                    self.chip.press_at(x, y)
                     return
+                same = getattr(self.chip, "span", None)
                 self._dismiss()
-            mark = frame.hit(x, y)
+                mark = frame.hit(x, y)
+                if mark and (frame.key, frame.text, mark.start, mark.end) == same:
+                    mark = None  # a second click on the same word only closes its chips
+            else:
+                mark = frame.hit(x, y)
             self.press_at = (frame.key, frame.text, mark.start, mark.end) if mark else None
         elif not down and self.pressed:
+            if self.chip and self.press_at is None:
+                self.chip.release_at(x, y)
             mark = frame.hit(x, y)
             if mark and self.press_at == (frame.key, frame.text, mark.start, mark.end):
                 self._open(frame, mark)
             self.press_at = None
         self.pressed = down
 
-    def _panel(self, frame, mark):
-        x, y, _, bottom = mark.bounds if mark else (frame.bounds or (0, 0, 0, 0))
-        top = y
-        if not mark and frame.bounds:
-            x, top, _, bottom = frame.bounds
+    def _cascade(self, frame, mark, menu, ring=True):
+        """Chips for one word (or the prompt box when the word is off screen)."""
         self._dismiss()
-        screen = self.paint.screen_at(x, bottom)
-        give_back = getattr(self.platform, "give_back", None)
-        target = frame.key[0] if frame.key else None
-        self.chip = ChipPanel(self.app.root, x, bottom, screen, below=top,
-                              no_activate=getattr(self.platform, "no_activate", None),
-                              on_show=(lambda: give_back(target)) if give_back and target else None)
-        return self.chip
+        if mark is not None:
+            parts = [m.bounds for m in frame.marks if (m.start, m.end) == (mark.start, mark.end)] or [mark.bounds]
+            anchor = (min(p[0] for p in parts), min(p[1] for p in parts),
+                      max(p[2] for p in parts), max(p[3] for p in parts))
+        else:
+            box = frame.bounds or (0, 0, 40, 20)
+            anchor = (box[0], box[1], box[0] + min(80, box[2] - box[0]), box[1] + 20)
+            ring = False
+        make = getattr(self.paint, "chip_surface", None)
+        surface = make() if make else TkSurface(self.app.root)
+        try:
+            scale = self.app.root.winfo_fpixels("1i") / 96
+        except Exception:
+            scale = 1.0
+        screen = self.paint.screen_at((anchor[0] + anchor[2]) // 2, anchor[3])
+        cascade = Cascade(menu, anchor, frame.bounds or None, screen, scale, surface, ring=ring)
+        cascade.on_finished = self._finished
+        cascade.span = (frame.key, frame.text, mark.start, mark.end) if mark is not None else None
+        self.chip = cascade
+        if not make:  # a Tk window may take focus (macOS): give it back to the editor
+            give_back = getattr(self.platform, "give_back", None)
+            if give_back and frame.key:
+                try:
+                    give_back(frame.key[0])
+                except Exception:
+                    pass
+        cascade.step()
+        try:
+            cascade.present()
+        except Exception:
+            pass
+        return cascade
 
     def _open(self, frame, mark, note=""):
         """첫 칩: 마스킹 / 원문유지 두 개."""
         span = (mark.start, mark.end, mark.label, mark.keep)
-        panel = self._panel(frame, mark)
+        self._cascade(frame, mark, self._root(frame, span, note))
         self.chip_text = (frame.key, frame.text)
-        self._root(panel, frame, span, note)
 
-    def _root(self, panel, frame, span, note=""):
+    def _root(self, frame, span, note=""):
         start, end, label, keep = span
-        panel.show(title=label, note=note,
-                   message="" if keep else "비밀값·기밀은 원문으로 보낼 수 없어요.", tone="warning",
-                   chips=[Chip("마스킹", lambda: self._mask(panel, frame, span)),
-                          Chip("원문유지", lambda: self._keep_reasons(panel, frame, span), enabled=keep)])
-
-    def _back(self, panel, frame, span):
-        return lambda: self._root(panel, frame, span)
+        lines = []
+        if note:
+            lines.append((note, "warning"))
+        if not keep:
+            lines.append(("비밀값·기밀은 원문으로 보낼 수 없어요.", "warning"))
+        return Menu(label, [
+            Option("마스킹", open=lambda depth: self._mask(frame, span, depth)),
+            Option("원문유지", menu=self._reasons(frame, span), enabled=keep),
+        ], lines=tuple(lines))
 
     def _work(self, job, done):
         """네트워크가 필요한 일은 작업 스레드에서. done(결과, 오류 문구)은 메인 스레드에서."""
@@ -291,75 +351,84 @@ class NativeOverlay:
 
         threading.Thread(target=run, daemon=True, name="overlay-chip").start()
 
-    def _mask(self, panel, frame, span, every=False):
-        """마스킹: 바뀔 값만 보여 주고 아래 칩으로 적용을 고른다."""
+    def _mask(self, frame, span, depth, every=False):
+        """마스킹: 바뀔 값만 보여 주고 아래 칩으로 적용을 고른다. 값을 만드는 동안은 불러오는 칩."""
         start, end, label, _ = span
         channel = channel_of(frame.key)
-        back = self._back(panel, frame, span)
-        panel.show(title=f"{label} · 마스킹", back=back, word="바꿀 값을 만드는 중…",
-                   chips=[Chip("적용", None, enabled=False)])
+        title = "모두 마스킹" if every else "마스킹"
+        cascade = self.chip
         actions = self.app.browser_actions
 
         def done(result, error):
-            if self.chip is not panel or not panel.exists():
+            if self.chip is not cascade or cascade is None or not cascade.exists():
                 return
             if error:
-                panel.show(title=f"{label} · 마스킹", back=back, message=error, tone="error",
-                           chips=[Chip("다시 시도", lambda: self._mask(panel, frame, span, every))])
-                return
-            others = len({(a, b) for a, b, *_ in frame.spans}) - 1
-            word = result["preview"] if result["deleted"] else result["word"]
-            chips = [Chip("적용" + (f" · {result['count']}곳" if result["count"] > 1 else ""),
-                          lambda: self._apply(panel, frame, span, result))]
-            if others > 0 and not every:
-                chips.append(Chip(f"모두 적용 {others + 1}", lambda: self._mask(panel, frame, span, every=True)))
-            panel.show(title=f"{label} · " + ("모두 마스킹" if every else "마스킹"), back=back, word=word,
-                       deleted=result["deleted"], chips=chips)
+                menu = Menu(title, [Option("다시 시도", stay=lambda: self._retry(cascade, frame, span, depth, every))],
+                            lines=((error, "error"),))
+            else:
+                others = len({(a, b) for a, b, *_ in frame.spans}) - 1
+                word = result["preview"] if result["deleted"] else result["word"]
+                options = [Option("적용" + (f" · {result['count']}곳" if result["count"] > 1 else ""),
+                                  lambda: self._apply(frame, span, result))]
+                if others > 0 and not every:
+                    options.append(Option(f"모두 적용 {others + 1}",
+                                          open=lambda d: self._mask(frame, span, d, every=True)))
+                menu = Menu(title, options, lines=((word, "deleted" if result["deleted"] else "word"),))
+            cascade.replace(depth, menu)
 
         self._work(lambda: actions.mask(channel, frame.text, start, end, label, every=every), done)
+        return Menu(title, [Option("적용", enabled=False)], lines=(("바꿀 값을 만드는 중…", "info"),))
 
-    def _apply(self, panel, frame, span, result):
+    def _retry(self, cascade, frame, span, depth, every):
+        cascade.replace(depth, self._mask(frame, span, depth, every))
+
+    def _reasons(self, frame, span):
+        """원문유지: 사유 칩 셋."""
+        return Menu("원문유지 사유", [Option(name, lambda code=code: self._keep(frame, span, code))
+                                    for code, name in KEEP_REASONS.items()])
+
+    def _result(self, frame, span, message, tone, options=()):
+        """최종 선택 뒤: 결과 한 줄 + 다음 항목 / 되돌리기 (글이 바뀌어도 남는다)."""
+        start, end, label, keep = span
+        mark = next((m for m in self.shown.marks if (m.start, m.end) == (start, end)), None)
+        if mark is None:
+            anchor_frame = Frame(frame.key, frame.text, (), (), frame.bounds)
+            cascade = self._cascade(anchor_frame, None, Menu(label, list(options), lines=((message, tone),)))
+        else:
+            cascade = self._cascade(frame, mark, Menu(label, list(options), lines=((message, tone),)), ring=False)
+        self.chip_text = None
+        return cascade
+
+    def _apply(self, frame, span, result):
         """적용: 입력창의 그 자리만 바꾼다 (새 창 없이). 바꾸기 전에 기록 상태를 먼저 맞춘다."""
         channel = channel_of(frame.key)
         actions = self.app.browser_actions
-        label = span[2]
         try:
             actions.commit(channel, result["ticket"], result["keys"])
         except ChipError as exc:
-            panel.show(title=label, message=str(exc), tone="error")
+            self._result(frame, span, str(exc), "error")
             return
-        self.chip_text = None  # 이제 글이 바뀐다: 이 칩은 끝 단계로 남는다
-        panel.show(title=label, message="입력창에서 바꾸는 중…", tone="info")
+        self._result(frame, span, "입력창에서 바꾸는 중…", "info")
 
         def done(ok):
             if ok:
                 word = "지웠어요" if result["deleted"] else f"{result['word']}{_ro(result['word'])} 바꿨어요"
-                self._finish(panel, frame.key, label, word, lambda: self._undo_mask(panel, frame.key, label, result))
+                self._finish(frame, span, word, lambda: self._undo_mask(frame, span, result))
             else:
                 actions.commit(channel, result["ticket"], result["keys"], applied=False)
-                if self.chip is panel and panel.exists():
-                    panel.show(title=label, message="입력창에서 바꾸지 못했어요. 입력창을 누른 뒤 다시 시도해 주세요.",
-                               tone="error")
+                self._result(frame, span, "입력창에서 바꾸지 못했어요. 입력창을 누른 뒤 다시 시도해 주세요.", "error")
 
         self.edits.put((frame.key, frame.text, result["edits"], done))
 
-    def _keep_reasons(self, panel, frame, span):
-        """원문유지: 사유 칩 셋."""
-        label = span[2]
-        panel.show(title=f"{label} · 원문유지 사유", back=self._back(panel, frame, span),
-                   chips=[Chip(name, lambda code=code: self._keep(panel, frame, span, code))
-                          for code, name in KEEP_REASONS.items()])
-
-    def _keep(self, panel, frame, span, reason):
+    def _keep(self, frame, span, reason):
         start, end, label, _ = span
         channel = channel_of(frame.key)
         actions = self.app.browser_actions
         try:
             out = actions.keep(channel, frame.text, start, end, reason)
         except ChipError as exc:
-            panel.show(title=label, back=self._back(panel, frame, span), message=str(exc), tone="error")
+            self._result(frame, span, str(exc), "error")
             return
-        self.chip_text = None
         self.live.drop(frame.text[start:end])
         self._drop(frame, start, end)
 
@@ -367,12 +436,11 @@ class NativeOverlay:
             try:
                 actions.unkeep(channel, frame.text, start, end)
             except ChipError as exc:
-                panel.show(title=label, message=str(exc), tone="error")
+                self._result(frame, span, str(exc), "error")
                 return
             self.live.refresh()  # 같은 글을 다시 검사해 하이라이트를 되살린다
-            self._dismiss()
 
-        self._finish(panel, frame.key, label, f"원문을 유지해요 · {out['reason']}", undo)
+        self._finish(frame, span, f"원문을 유지해요 · {out['reason']}", undo)
 
     def _drop(self, frame, start, end):
         """원문유지한 값의 하이라이트를 바로 지운다 (다음 검사를 기다리지 않음)."""
@@ -383,46 +451,40 @@ class NativeOverlay:
         if not spans:
             self.target = None
 
-    def _finish(self, panel, key, label, message, undo):
+    def _finish(self, frame, span, message, undo):
         """끝 단계: 결과 한 줄 + 다음 항목 / 되돌리기."""
-        if self.chip is not panel or not panel.exists():
-            return
-        chips = []
-        if self.frame.key == key and self.frame.marks:
-            chips.append(Chip("다음 항목", self._next))
-        chips.append(Chip("되돌리기", undo, kind="ghost", icon="undo"))
-        panel.show(title=label, message=message, tone="success", chips=chips)
+        options = []
+        if self.frame.key == frame.key and self.frame.marks:
+            options.append(Option("다음 항목", self._next))
+        options.append(Option("되돌리기", undo))
+        self._result(frame, span, message, "success", options)
 
     def _next(self):
         frame = self.frame
         if frame.marks:
             self._open(frame, frame.marks[0])
-        else:
-            self._dismiss()
 
-    def _undo_mask(self, panel, key, label, result):
+    def _undo_mask(self, frame, span, result):
+        key = frame.key
         channel = channel_of(key)
         actions = self.app.browser_actions
-        frame = self.frame
-        if frame.key != key:
-            panel.show(title=label, message="입력창을 다시 눌러 주세요.", tone="error")
+        now = self.frame
+        if now.key != key:
+            self._result(frame, span, "입력창을 다시 눌러 주세요.", "error")
             return
         try:
-            back = actions.undo(channel, result["ticket"], result["keys"], frame.text)
+            back = actions.undo(channel, result["ticket"], result["keys"], now.text)
         except ChipError as exc:
-            panel.show(title=label, message=str(exc), tone="error")
+            self._result(frame, span, str(exc), "error")
             return
         actions.commit(channel, result["ticket"], result["keys"], applied=False)
 
         def done(ok):
             if not ok:
                 actions.commit(channel, result["ticket"], result["keys"])
-                if self.chip is panel and panel.exists():
-                    panel.show(title=label, message="되돌리지 못했어요. 입력이 바뀌었는지 확인해 주세요.", tone="error")
-            elif self.chip is panel:
-                self._dismiss()
+                self._result(frame, span, "되돌리지 못했어요. 입력이 바뀌었는지 확인해 주세요.", "error")
 
-        self.edits.put((key, frame.text, back["edits"], done))
+        self.edits.put((key, now.text, back["edits"], done))
 
     def _enter_blocked(self):
         """Enter 훅 스레드에서 불린다: 메인 스레드에 칩을 띄우라고만 알린다."""
@@ -431,20 +493,19 @@ class NativeOverlay:
     def _show_blocked(self):
         frame = self.frame
         if self.chip is not None and self.chip.exists():
-            self.chip.win.lift()
             return
         note = "보내기 전에 표시된 항목을 처리해 주세요"
         if frame.marks:
             self._open(frame, frame.marks[0], note)
         elif frame.spans:
             a, b, label, keep = frame.spans[0]
-            panel = self._panel(frame, None)
+            self._cascade(frame, None, self._root(frame, (a, b, label, keep), note))
             self.chip_text = (frame.key, frame.text)
-            self._root(panel, frame, (a, b, label, keep), note)
 
     def _dismiss(self):
         if self.chip is not None:
-            self.chip.destroy()
+            self.chip.close()
+            self.fading.append(self.chip)
             self.chip = None
         self.chip_text = None
 
@@ -458,5 +519,10 @@ class NativeOverlay:
                 pass
         if self.paint:
             self.app.root.after_cancel(self.timer)
-            self._dismiss()
+            for cascade in [c for c in (self.chip, *self.fading) if c is not None]:
+                try:
+                    cascade.surface.close()
+                except Exception:
+                    pass
+            self.chip, self.fading = None, []
             self.paint.close()

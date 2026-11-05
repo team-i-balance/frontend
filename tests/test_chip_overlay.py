@@ -1,4 +1,4 @@
-"""원래 입력창 칩: 마스킹 / 원문유지 → 바뀔 값·사유 칩 → 입력창의 그 자리만 바꾼다. 새 창은 열지 않는다.
+"""원래 입력창 칩: 마스킹 / 원문유지 → 바뀔 값·사유 칩(옆에 펼쳐지는 다음 칩) → 입력창의 그 자리만 바꾼다. 새 창은 열지 않는다.
 
 이 파일 이름은 test_native_overlay보다 앞에 오게 둔다: macOS에서는 Tk가 NSApplication을 먼저 만들어야 한다."""
 
@@ -13,11 +13,11 @@ from agent import config
 from agent.browser.actions import BrowserActions
 from agent.gui import theme
 from agent.overlay.controller import NativeOverlay, channel_of, make_frame
-from agent.overlay.source import Draft, Snapshot, end_only
+from agent.overlay.source import Draft, Snapshot
 from agent.server.client import DecideResult, ProcessResult
 
 PHONE = "010-2345-6789"
-KEY = (77, "chatgpt.com", (1, 2), "https://chatgpt.com/")
+KEY = (77, "claude.ai", (1, 2), "https://claude.ai/new")
 
 
 class FakeApp:
@@ -203,11 +203,6 @@ class OverlayChipTests(unittest.TestCase):
         self.overlay.live = Mock(update=lambda key, text="": [], error=False)
         self.overlay._sample(Reader(True))  # 하이라이트가 없어지면 막지 않는다
         self.assertIsNone(self.overlay.target)
-
-    def test_terminal_only_retypes_the_last_value(self):
-        draft = Draft.plain(f"연락 {PHONE}")
-        self.assertTrue(end_only(draft, 3, len(draft.text)))
-        self.assertFalse(end_only(draft, 0, 2))
 
 
 if __name__ == "__main__":

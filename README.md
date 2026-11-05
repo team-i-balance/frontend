@@ -1,10 +1,11 @@
 # AI 누리 보안 · PC 앱 (KP Guard 프로토타입)
 
-생성형 AI(Claude Code, Codex CLI, IDE 터미널, 명령 프롬프트, 웹 채팅)에 프롬프트를 보내기 전에
-개인정보·기밀정보를 찾아 가려 주는 도구. 탐지·가명화·기록·답변 복원은 **팀 서버(backend)**가 하고,
-이 PC의 앱은 감시·화면·조직 베이스 확인을 맡는다. 서버로 보내지 않는 "이 PC에서만 처리" 모드도 있다.
+생성형 AI에 프롬프트를 보내기 전에 개인정보·기밀정보를 찾아 가려 주는 도구. 탐지·가명화·기록·답변 복원은
+**팀 서버(backend)**가 하고, 이 PC의 앱은 감시·화면·조직 베이스 확인을 맡는다. 서버로 보내지 않는 "이 PC에서만 처리" 모드도 있다.
 
-> 지금은 **일반 사용자용 GUI 흐름 확인용**이다. UI는 이후 교체한다. 작업 목록: `.kiro/specs/kp-guard/tasks.md`
+> **지금 범위 (시연용, 2026-11-05):** Windows의 Chrome·Edge에서 **브라우저의 Claude(claude.ai, Claude Code 웹 `claude.ai/code` 포함)**만
+> 실시간으로 감시한다. ChatGPT·CLI·터미널은 감시하지 않고, macOS는 검증하지 않는다 (코드는 남아 있다).
+> UI는 이후 교체한다. 작업 목록: `.kiro/specs/kp-guard/tasks.md`
 
 ## 실행
 
@@ -17,13 +18,20 @@ pythonw kp_guard.pyw --background    # 창 없이 트레이에 상주 (자동 �
 첫 실행 때 "Windows 로그인 시 자동 실행" 여부를 묻는다. 설정 창에서 언제든 켜고 끌 수 있다
 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\KPGuard`, 관리자 권한 불필요).
 
-## 원래 입력창에 자동 하이라이트
+## 브라우저의 Claude 입력창에 자동 하이라이트
 
-KP Guard를 실행하고 평소처럼 ChatGPT·Claude 웹이나 Claude Code·Codex CLI에 입력합니다. 기본으로 켜진 **AI 입력창에 자동 하이라이트**가 현재 문장을 팀 서버에서 검사하고, 운영체제가 알려 준 단어 좌표에 반투명 표시를 그립니다. 확장 설치, 연결 코드, 전용 터미널 실행은 필요하지 않습니다. macOS에서는 처음 한 번 설정의 **손쉬운 사용 권한 확인**을 눌러 KP Guard(소스 실행 시 해당 Python 앱)에 권한을 허용합니다.
+KP Guard를 실행하고 평소처럼 Chrome이나 Edge에서 Claude(claude.ai, Claude Code 웹)에 입력합니다. 기본으로 켜진
+**AI 입력창에 자동 하이라이트**가 현재 문장을 팀 서버(`POST /process/preview`)에서 검사하고, Windows UI Automation이 알려 준
+단어 좌표에 반투명 표시를 그립니다. 확장 설치나 연결 코드는 필요하지 않습니다.
 
 화면 이름은 **AI 누리 보안**입니다 (실행 파일·설정 폴더·환경 변수는 그대로 `KPGuard`·`KPGUARD_*`).
 
 ### 칩 (새 창 없이 칩을 펼쳐 마무리)
+
+칩은 단계형입니다. 선택지는 세로로 놓이고, 하위 선택지가 있는 칩을 고르면 오른쪽에 다음 칩이 열리며 앞 칩은 고른 칸이 파랗게 표시된 채 남습니다.
+첫 칩은 입력창 바깥(위, 자리가 없으면 아래)에 떠서 프롬프트를 가리지 않고, 단어와 칩·고른 칸과 다음 칩은 ERD처럼 파란 점선으로 이어집니다.
+최종 선택(적용·사유)을 하면 칩이 모두 사라진 뒤 실행되고, 결과 한 줄과 **다음 항목 · 되돌리기** 칩이 잠깐 뜹니다.
+호버·누르기·선택·열기·닫기에 애니메이션이 있습니다.
 
 설정에서 직접 켠 기능(복사한 프롬프트 자동 점검 등)이 아니면, 하이라이트에서 시작한 행동은 창을 열지 않고 칩 안에서 끝납니다.
 
@@ -38,23 +46,14 @@ KP Guard를 실행하고 평소처럼 ChatGPT·Claude 웹이나 Claude Code·Cod
 
 - Windows: 칩 창은 포커스를 가져가지 않습니다(`WS_EX_NOACTIVATE`). 바꿀 때는 UI Automation으로 그 범위를 고르고 유니코드 키 입력으로 칩니다. Enter는 저수준 키보드 훅으로, 하이라이트가 남은 그 입력창에 커서가 있을 때만 막습니다 (주소창 등 다른 곳의 Enter는 그대로)
 - macOS: 손쉬운 사용으로 범위를 고르고 `AXSelectedText`로 바꿉니다(안 되면 키 입력). Enter는 이벤트 탭으로 막으며 같은 손쉬운 사용 권한을 씁니다
-- 터미널(Claude Code·Codex 화면): 커서 위치를 알 수 없어 **입력 끝에 있는 값만** 지우고 다시 칩니다. 다른 자리는 칩에 안내가 나오며, 보호된 CLI 입력창(아래)에서는 어디든 바꿀 수 있습니다
 - 바꾼 뒤에는 입력창을 다시 읽어 결과가 맞는지 확인하고, 다르면 칩에 실패를 알리고 기록 상태를 되돌립니다
 
-Windows는 UI Automation, macOS는 손쉬운 사용으로 텍스트 범위와 화면 좌표를 제공하는 브라우저에서 동작합니다. 터미널은 Windows Terminal·Windows 콘솔, macOS Terminal·iTerm2에서 식별되는 Claude Code·Codex 입력 블록을 읽습니다. 터미널 이력과 답변은 검사에서 제외합니다. 터미널 테마·버전이 입력 영역을 구분하지 못하거나 앱이 좌표를 제공하지 않는 경우 아래 입력 방식을 사용할 수 있습니다. **이 PC에서만 처리**와 감시 일시정지도 자동 하이라이트에 적용됩니다.
+- 감시하는 곳은 claude.ai 페이지의 작성란뿐입니다. 다른 사이트·ChatGPT·터미널·CLI의 입력은 읽지도 서버로 보내지도 않습니다
+- 입력 중 검사로는 작업·로그를 만들지 않고, 사용자가 가명화·원문 사용 등을 고르면 기존 처리 API를 씁니다
+- **이 PC에서만 처리**와 감시 일시정지도 자동 하이라이트에 적용됩니다
 
-## 선택 기능 · 브라우저 확장과 보호된 CLI 입력창
-
-브라우저 확장과 터미널 입력창은 타이핑이 시작되면 현재 프롬프트를 검사합니다. 기본 서버 모드에서 팀 서버의 `POST /process/preview`를 사용합니다. 입력 중 탐지 결과로 작업·로그를 만들지 않고, 사용자가 가명화·원문 사용 등을 선택하면 기존 처리 API를 사용합니다. [확장 연결 및 칩 사용법](browser-extension/README.md)
-
-Claude Code 또는 Codex CLI를 설치하고 해당 CLI에서 로그인한 뒤, PC 앱의 **브라우저·CLI 연결 코드 복사**를 한 번 누릅니다. 이 레포 루트에서 다음 중 하나를 실행합니다. 다른 프로젝트에서 작업할 때는 해당 프로젝트 폴더로 이동한 뒤 `python /절대경로/program/kp_guard_cli.py claude` 또는 `codex`로 실행합니다.
-
-```sh
-python -m agent.cli claude
-python -m agent.cli codex
-```
-
-보호된 터미널 입력창도 같은 칩을 씁니다. 표시된 단어를 클릭하거나 커서를 놓고 **F2**를 누르면 칩(마스킹 · 원문유지)이 열리고, 하이라이트가 남은 채 **Enter**를 누르면 보내지 않고 첫 항목의 칩을 엽니다. 칩이 열려 있으면 **숫자**(1·2·3)나 **←→·Tab**으로 고르고 **Enter**로 누르며, **Esc**는 뒤로·닫기입니다. 하이라이트가 없을 때 **Enter**로 실제 CLI에 전송합니다. **F4**는 최근 답변 복원(결과는 아래 줄에), **Ctrl+J**는 줄바꿈입니다. 같은 실행의 후속 질문은 공급자가 반환한 세션 ID로 이어집니다. 이 진입점은 Claude Code의 print 모드와 Codex의 exec 모드를 사용합니다. 기존 네이티브 TUI의 슬래시 명령과 승인 대화상자는 해당 CLI 자체 실행에서 사용합니다.
+**선택 기능 · 브라우저 확장.** UI Automation 대신 확장으로 claude.ai 작성란을 직접 다루려면 설정 창의
+**브라우저 연결 코드 복사**를 누르고 확장에 붙여넣습니다. [확장 연결 및 칩 사용법](browser-extension/README.md)
 
 ## 처리 위치: 서버 (기본) / 이 PC
 
@@ -183,8 +182,7 @@ exe에는 onnxruntime 등 실행 모듈만 들어가고 모델 파일은 들어�
 ## 화면 디자인
 
 기본 디자인 설정은 [`docs/DESIGN-SETTINGS.md`](docs/DESIGN-SETTINGS.md)(AI 누리 보안 — 보안팀 콘솔과 같은 설정)이다.
-PC 앱은 `agent/gui/theme.py`, 칩은 `agent/gui/chip.py`, 브라우저 확장은 `browser-extension/content.js`·`connect.html`,
-보호된 CLI 입력창은 `agent/cli.py`의 `STYLE`에 같은 값을 옮겼다.
+PC 앱은 `agent/gui/theme.py`, 입력창 위 칩은 `agent/overlay/chips.py`(같은 색 값을 옮김), 브라우저 확장은 `browser-extension/content.js`·`connect.html`에 있다.
 
 - 다크 하나. 구조는 면으로 나눈다: 바탕 `#1E2126` → 패널 `#25292D`(테두리 없음, 모서리 16) → 요소 `#343A40`(입력·문장 상자·버튼 면)
 - **시그널 블루는 세 곳에만**: 창마다 주 행동 하나(`#3570E0` 채운 버튼), 고른 것(옅은 파란 면), 키보드 포커스(`#8FB5FF`).
@@ -230,7 +228,7 @@ KPGUARD_SMOKE_SERVER=https://127.0.0.1:8443 python tools/smoke_gui.py
 
 1. 백그라운드 상주 (트레이 아이콘: 초록=감시 중, 주황=일시정지, 회색=꺼짐)
 2. 트리거
-   - 기본: ChatGPT·Claude·Claude Code·Codex 입력창에 쓰는 동안 자동 하이라이트 → 칩(위 "칩" 참고)
+   - 기본: 브라우저 Claude(claude.ai, Claude Code 웹 포함) 입력창에 쓰는 동안 자동 하이라이트 → 칩(위 "칩" 참고)
    - 설정에서 **복사한 프롬프트 자동 점검**을 직접 켜면: 프롬프트를 **복사**할 때 민감정보가 있으면 점검 창이 뜬다
      (기본은 꺼짐. 켜 두면 AI 답변을 복사할 때 답변 복원 창도 뜬다)
    - `Ctrl+Alt+P`: 빈 점검 창을 열고 프롬프트를 직접 작성
@@ -242,7 +240,7 @@ KPGUARD_SMOKE_SERVER=https://127.0.0.1:8443 python tools/smoke_gui.py
    - 기밀: 마스킹 = 이 부분 빼고 보내기, 원문유지 = 사유를 남기고 차단 해제
    - 밑줄 항목 = 확인 필요(자동 변환 안 함), 칩에서 마스킹을 고른다
 5. 놓친 정보: 원문에서 드래그 → 우클릭 → "이것도 가려줘"
-6. **[변환문 복사]** → CLI에 붙여넣기 / [취소] / [원문 그대로 사용] → 버튼 위에 사유 칩 셋
+6. **[변환문 복사]** → Claude 입력창에 붙여넣기 / [취소] / [원문 그대로 사용] → 버튼 위에 사유 칩 셋
 7. `Ctrl+Alt+R`로 답변 복원 창을 연다 (자동 점검을 켰다면 AI 답변을 복사할 때 자동으로 뜬다)
 8. 행동은 큐로 분류돼 로그에 남는다 (원문 없음): `%LOCALAPPDATA%\KPGuard\events.db`, `logs\YYYY-MM-DD.jsonl`
 
@@ -260,7 +258,7 @@ agent/
 ├─ server/                 client(backend API·파일 업로드/다운로드·토큰·인증서 고정) · align(서버 결과 ↔ 원문 위치, 보낼 글 조립, 미리 가리기)
 ├─ events/log.py           SQLite 로그, classify() 큐 분류, JSONL 내보내기
 ├─ system/                 win32(클립보드·단축키·뮤텍스) · autostart(레지스트리 Run)
-├─ browser/                actions(칩 동작: 미리보기·마스킹·원문유지·기록·복원) · bridge(확장 연결) · peer(CLI 연결)
+├─ browser/                actions(칩 동작: 미리보기·마스킹·원문유지·기록·복원) · bridge(확장 연결) · peer(연결 테스트용 클라이언트)
 ├─ overlay/                controller(원래 입력창 하이라이트·칩·Enter 막기) · windows · macos · source · live
 ├─ gui/                    app(상주·감시) · theme(디자인 설정) · chip(칩 패널) · review(점검 창)
 │                          · server_review(서버 처리 점검·복원 창) · file_window(파일 검사)
@@ -278,9 +276,9 @@ build.ps1 · KPGuard.spec   데스크톱 앱(exe) 빌드
 - 기본 탐지는 정규식 + 작은 사전. 소형 모델(AEGIS)은 모델 파일을 지정해야 켜지고, 실제 모델로는 아직 측정하지 않았다
   (CPU 실행만, INT8 변환·NPU는 Phase 4). SLM(기밀 구간)은 모델 파일을 받은 뒤 연결한다
 - 파일 검사는 값만 있는 `.xlsx`만 지원한다. docx·pptx·hwp·pdf는 Phase 2 남은 작업
-- CLI의 기존 입력 블록을 감시해 화면에 표시한다. 원래 터미널에서는 입력 끝의 값만 칩으로 바로 바꿀 수 있다.
-- Enter 막기와 입력창 제자리 바꾸기(Windows UIA·macOS AX)는 Linux 개발 환경에서 가짜 입력창으로만 시험했다.
-  실제 Windows·macOS 브라우저와 터미널에서는 CI(`tools/smoke_native.py`)나 직접 실행으로 확인해야 한다
+- 실시간 감시는 브라우저의 claude.ai(Windows Chrome·Edge)만 한다. ChatGPT·CLI·터미널 입력창 지원은 시연 범위에서 뺐다
+  (2026-11-05). 검증은 claude.ai 재현 페이지와 가짜 서버로 했고, 로그인한 실제 claude.ai는 사람이 확인한다
+- Enter 막기와 입력창 제자리 바꾸기(Windows UIA)는 CI(`tools/smoke_native.py`)의 재현 페이지와 직접 실행으로 확인한다
 - 이 PC 처리의 매핑은 앱 메모리에만 있어 앱을 끄면 이전 답변은 복원할 수 없다 (의도된 동작).
   서버 처리의 매핑은 서버에 10분, 한 번 복원할 때까지만 있다
 - 서버 처리는 실제 팀 서버(`13.193.207.69`)로는 검증하지 못했다 (개발 환경에서 닿지 않음).
@@ -291,7 +289,9 @@ build.ps1 · KPGuard.spec   데스크톱 앱(exe) 빌드
 - 모든 예시 값은 합성 데이터
 - exe는 코드 서명이 없어 SmartScreen·백신 경고가 뜰 수 있고, 설치 프로그램은 아직 없다 (태스크 27)
 
-## macOS 실행과 검증
+## macOS 실행 (검증하지 않음)
+
+> 시연 범위에서 빠져 CI가 macOS를 돌리지 않는다 (2026-11-05). 아래는 남아 있는 코드의 사용법이다.
 
 macOS에서 Python 3.10 이상과 tkinter가 준비되면 가상환경을 만들고 `pip install -r requirements-dev.txt`를 실행한 다음 `python -m agent.main`으로 실행한다. 모델 파일은 별도로 준비해 설정 창에서 선택한다. 네트워크를 사용하지 않으려면 처리 위치를 **이 PC에서만 처리**로 선택한다. 기존 설정의 서버 주소와 처리 위치도 확인한다.
 
@@ -305,7 +305,7 @@ macOS에서 Python 3.10 이상과 tkinter가 준비되면 가상환경을 만들
 
 macOS의 시스템 설정에서 앱이 요청하는 입력 모니터링 등 권한을 확인한다. 권한을 거부하면 자동 감시나 전역 단축키가 제한될 수 있으며 직접 입력으로 점검할 수 있다. 전역 단축키 입력은 다른 앱에도 전달될 수 있다.
 
-자동 테스트: `python -m unittest discover -s tests -t . -v`. CI는 macOS와 Windows에서 각각 실행한다. GUI, 실제 모델, 권한 승인 및 로그인 흐름은 자동 테스트만으로 확인되지 않는다. 원문과 매핑을 외부로 전송하지 않는 조건을 적용할 때는 실제 설정과 연결 대상을 별도로 확인한다.
+자동 테스트: `python -m unittest discover -s tests -t . -v`. CI는 Windows에서만 실행한다 (macOS는 검증하지 않음). GUI, 실제 모델, 권한 승인 및 로그인 흐름은 자동 테스트만으로 확인되지 않는다. 원문과 매핑을 외부로 전송하지 않는 조건을 적용할 때는 실제 설정과 연결 대상을 별도로 확인한다.
 
 ## macOS 앱 빌드
 

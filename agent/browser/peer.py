@@ -1,4 +1,4 @@
-"""Authenticated local IPC used by the terminal composer."""
+"""Authenticated local IPC client for the browser bridge (tests and tools)."""
 
 import hmac
 import json
@@ -15,7 +15,7 @@ class Peer:
     def __init__(self, key=None, port=PORT):
         self.key = key or config.load_settings().get("browser_key")
         if not self.key:
-            raise ChipError("AI 누리 보안 앱의 설정에서 ‘브라우저·CLI 연결 코드 복사’를 먼저 누르세요.")
+            raise ChipError("AI 누리 보안 앱의 설정에서 ‘브라우저 연결 코드 복사’를 먼저 누르세요.")
         self.base = f"http://127.0.0.1:{port}/v1/"
         self.channel = secrets.token_hex(16)
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))

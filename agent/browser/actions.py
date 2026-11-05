@@ -23,6 +23,7 @@ from ..detect import lexicon, rules
 from ..detect.pipeline import detect
 from ..detect.span import TYPE_LABELS
 from ..events.log import REASON_PRIORITY
+from ..overlay.source import SITES
 from ..sanitize.engine import Session, delete_end, make_items, replacement_for
 from ..sanitize.josa import fix_josa
 from ..sanitize.restore import restore
@@ -241,7 +242,7 @@ class BrowserActions:
         active = self.app.monitoring_active()
         site = data.get("site")
         channel = data.get("channel")
-        if active and site in ("chatgpt.com", "claude.ai") and isinstance(channel, str):
+        if active and site in SITES and isinstance(channel, str):
             with self.lock:
                 if action == "preview" and isinstance(data.get("text"), str):
                     self.extension = (channel, site, hash(data["text"]), time.monotonic() + 7)

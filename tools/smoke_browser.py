@@ -1,7 +1,8 @@
-"""Browser extension regression: both editor types, typing, click-away and editor replacement.
+"""Browser extension regression on claude.ai: typing, click-away and editor replacement.
 
-Run with Playwright Chromium installed. --fixture-runtime also supports a headless-shell binary.
-The fixture never contacts ChatGPT, Claude or a production team server.
+Scope (2026-11-05): Claude in the browser only. Run with Playwright Chromium installed.
+--fixture-runtime also supports a headless-shell binary.
+The fixture never contacts Claude or a production team server.
 """
 
 import argparse
@@ -63,11 +64,7 @@ class SeenActions(BrowserActions):
 
 def check_editor(context, peer, desktop, site, use_shell):
     page = context.new_page()
-    html = (
-        '<textarea id="prompt-textarea"></textarea>'
-        if site == "chatgpt.com"
-        else '<div class="ProseMirror" role="textbox" contenteditable="true"><p><br></p></div>'
-    )
+    html = '<div class="ProseMirror" role="textbox" contenteditable="true"><p><br></p></div>'
     page.route(
         "https://" + site + "/**",
         lambda route: route.fulfill(
@@ -239,9 +236,7 @@ def main():
         if not args.fixture_runtime:
             worker = (ctx.service_workers or [ctx.wait_for_event("serviceworker", timeout=15000)])[0]
             worker.evaluate("(key)=>chrome.storage.local.set({key})", key)
-        for site in ("chatgpt.com", "claude.ai"):
-            desktop.revisions.clear()
-            check_editor(ctx, peer, desktop, site, args.fixture_runtime)
+        check_editor(ctx, peer, desktop, "claude.ai", args.fixture_runtime)
 
 
 if __name__ == "__main__":

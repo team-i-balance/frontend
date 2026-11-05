@@ -1,7 +1,7 @@
 """Type into a real browser window, wait for native marks, and click through them.
 
-The two AI origins and the detector are local fixtures. No extension or browser pairing.
-Run on an interactive Windows desktop, or on macOS with Accessibility granted to Python.
+Scope (2026-11-05): Claude in the browser only. The claude.ai origin, an unrelated origin and the detector
+are local fixtures. No extension or browser pairing. Run on an interactive Windows desktop.
 """
 
 import sys
@@ -32,6 +32,25 @@ def mouse(x, y, down):
             None, Q.kCGEventLeftMouseDown if down else Q.kCGEventLeftMouseUp, (x, y), Q.kCGMouseButtonLeft
         )
         Q.CGEventPost(Q.kCGHIDEventTap, event)
+
+
+def win_foreground_kept(hwnd):
+    if sys.platform != "win32":
+        return True
+    from agent.overlay import windows as win
+
+    return win.foreground() == hwnd
+
+
+def capture(name):
+    """Screenshot for the CI artifact (Windows only)."""
+    if sys.platform != "win32":
+        return
+    from PIL import ImageGrab
+
+    folder = Path("smoke-artifacts")
+    folder.mkdir(exist_ok=True)
+    ImageGrab.grab(all_screens=True).save(folder / f"{name}.png")
 
 
 def activate_fixture(page, field):
@@ -123,7 +142,6 @@ def main():
             )
             ctx = browser.new_context(no_viewport=True)
             documents = {
-                "chatgpt.com": '<textarea id="prompt-textarea" aria-label="Message ChatGPT"></textarea>',
                 "claude.ai": '<div role="textbox" aria-multiline="true" aria-label="Reply to Claude" contenteditable="true" class="tiptap ProseMirror"></div>',
                 "example.org": '<textarea id="prompt-textarea"></textarea>',
             }
@@ -177,6 +195,26 @@ def main():
                 finally:
                     mouse(*word, False)
                 until(lambda: overlay.chip is not None, "chip above the word")
+                # A row with more options opens the next chip and keeps the first one.
+                first = overlay.chip.cards[0]
+                rx0, ry0, rx1, ry1 = first.row_box(0)
+                row = (rx0 + rx1) // 2, (ry0 + ry1) // 2
+                cx0, cy0, cx1, cy1 = first.tx, first.ty, first.tx + first.w, first.ty + first.h
+                assert cx1 <= x or cx0 >= r or cy1 <= y or cy0 >= b, "first chip covers the word"
+                capture(f"chip-open-{sys.argv[1] if len(sys.argv) > 1 else 'chrome'}")
+                mouse(*row, True)
+                try:
+                    until(lambda: overlay.pressed, "mouse down on the chip")
+                finally:
+                    mouse(*row, False)
+                until(lambda: overlay.chip is not None and len(overlay.chip.cards) == 2, "next chip opened")
+                assert overlay.chip.cards[0].selected == 0
+                assert win_foreground_kept(hwnd), "clicking a chip took focus from the browser"
+                settle = time.monotonic() + 0.6
+                while time.monotonic() < settle:
+                    root.update()
+                    time.sleep(0.01)
+                capture(f"chip-{sys.argv[1] if len(sys.argv) > 1 else 'chrome'}")
                 # Click in the page margin above the editor, outside the chip.
                 margin = x - 24, y - 16
                 mouse(*margin, True)

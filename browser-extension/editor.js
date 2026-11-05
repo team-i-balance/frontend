@@ -2,10 +2,9 @@
 (() => {
   const blocks = new Set(['DIV', 'P', 'LI', 'PRE', 'BLOCKQUOTE', 'SECTION', 'H1', 'H2', 'H3']);
   const textarea = (el) => el instanceof HTMLTextAreaElement;
+  // Claude (claude.ai, including Claude Code on the web) only.
   const selector =
-    location.hostname === 'chatgpt.com'
-      ? '#prompt-textarea, textarea[data-testid="prompt-textarea"]'
-      : '[data-testid="chat-input"][contenteditable], [data-testid="chat-input"] [contenteditable="true"], div.ProseMirror[contenteditable="true"], textarea[data-testid="chat-input"]';
+    '[data-testid="chat-input"][contenteditable], [data-testid="chat-input"] [contenteditable="true"], div.ProseMirror[contenteditable="true"], textarea[data-testid="chat-input"]';
 
   function composer() {
     return [...document.querySelectorAll(selector)].find(

@@ -32,7 +32,7 @@ document.querySelector('#restore').onclick = async () => {
     await api.tabs.sendMessage(tab.id, { action: 'openRestore' });
     window.close();
   } catch {
-    say('ChatGPT 또는 Claude 탭에서 여세요.', 'error');
+    say('Claude(claude.ai) 탭에서 여세요.', 'error');
   }
 };
 
