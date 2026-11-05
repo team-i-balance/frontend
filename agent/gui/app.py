@@ -19,7 +19,7 @@ from ..events.log import EventLog
 from ..sanitize.engine import Session
 from ..sanitize.restore import restore
 from ..server.client import WORK_TTL_SECONDS, ServerClient, ServerError
-from ..system import autostart, win32
+from ..system import autostart, platform_api
 from . import theme, tray
 from .file_window import FileWindow
 from .restore_window import RestoreWindow
@@ -29,10 +29,10 @@ from .server_review import ServerRestoreWindow, ServerReviewWindow
 from .settings_window import SettingsWindow
 
 HOTKEYS = {
-    1: (win32.MOD_CONTROL | win32.MOD_ALT, ord("P"), "Ctrl+Alt+P 점검 창"),
-    2: (win32.MOD_CONTROL | win32.MOD_ALT, ord("R"), "Ctrl+Alt+R 답변 복원"),
-    3: (win32.MOD_CONTROL | win32.MOD_ALT, ord("O"), "Ctrl+Alt+O 설정"),
-    4: (win32.MOD_CONTROL | win32.MOD_ALT, ord("F"), "Ctrl+Alt+F 파일 검사"),
+    1: (platform_api.MOD_CONTROL | platform_api.MOD_ALT, ord("P"), "Ctrl+Alt+P 점검 창"),
+    2: (platform_api.MOD_CONTROL | platform_api.MOD_ALT, ord("R"), "Ctrl+Alt+R 답변 복원"),
+    3: (platform_api.MOD_CONTROL | platform_api.MOD_ALT, ord("O"), "Ctrl+Alt+O 설정"),
+    4: (platform_api.MOD_CONTROL | platform_api.MOD_ALT, ord("F"), "Ctrl+Alt+F 파일 검사"),
 }
 PAUSE_SECONDS = 30 * 60
 MAX_CLIP_LEN = 50_000
@@ -77,7 +77,7 @@ class App:
         self.restore_win: RestoreWindow | None = None
         self.settings_win: SettingsWindow | None = None
         self.file_win: FileWindow | None = None
-        self._last_seq = win32.clipboard_sequence()
+        self._last_seq = platform_api.clipboard_sequence()
         self._own_seq = None
         self._toast_win = None
 
@@ -96,7 +96,7 @@ class App:
             self.check_server()
 
         self.tray = tray.Tray(self) if tray.available() else None
-        self.hotkeys = win32.HotkeyThread(HOTKEYS, lambda hid: self.post("hotkey", hid))
+        self.hotkeys = platform_api.HotkeyThread(HOTKEYS, lambda hid: self.post("hotkey", hid))
         self.hotkeys.start()
         if self.tray:
             self.tray.start()
@@ -299,12 +299,12 @@ class App:
     # ================================================================== 클립보드 감시
     def _watch_clipboard(self) -> None:
         try:
-            seq = win32.clipboard_sequence()
+            seq = platform_api.clipboard_sequence()
             if seq != self._last_seq:
                 self._last_seq = seq
                 if (self.settings["clipboard_watch"] and self.monitoring_active() and seq != self._own_seq
-                        and not win32.own_window_in_foreground()):
-                    text = win32.get_clipboard_text()
+                        and not platform_api.own_window_in_foreground()):
+                    text = platform_api.get_clipboard_text()
                     if text:
                         self._inspect_clipboard(text)
         except Exception as exc:  # 감시 루프는 죽지 않게
@@ -331,11 +331,11 @@ class App:
             self.open_review(text, "clipboard")
 
     def copy_to_clipboard(self, text: str) -> None:
-        if not win32.set_clipboard_text(text):
+        if not platform_api.set_clipboard_text(text):
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             self.root.update()
-        self._own_seq = win32.clipboard_sequence()
+        self._own_seq = platform_api.clipboard_sequence()
         self._last_seq = self._own_seq
 
     # ================================================================== 창 열기

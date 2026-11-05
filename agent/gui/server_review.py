@@ -21,7 +21,7 @@ from ..events.log import REASON_PRIORITY
 from ..sanitize.restore import restore as local_restore
 from ..server.align import LABEL_TYPE, PLACEHOLDER, Repl, align, compose, premask, to_orig
 from ..server.client import ServerError
-from ..system import win32
+from ..system import platform_api
 from . import theme
 from .restore_window import build_restore_layout
 from .review import MISSED_TYPES, REASON_SHORT, REASONS, ReasonDialog, Tooltip, _short, build_layout, shape_of
@@ -615,7 +615,7 @@ class ServerReviewWindow(tk.Toplevel):
         self.app.open_review(text, self.source, local=True)
 
     def _load_clipboard(self) -> None:
-        text = win32.get_clipboard_text()
+        text = platform_api.get_clipboard_text()
         if text:
             self.orig.delete("1.0", "end")
             self.orig.insert("1.0", text)
@@ -750,7 +750,7 @@ class ServerRestoreWindow(tk.Toplevel):
             self.btn_run.configure(text="복원 결과 복사", command=self._copy)
 
     def _paste(self) -> None:
-        text = win32.get_clipboard_text()
+        text = platform_api.get_clipboard_text()
         if text:
             self.src.delete("1.0", "end")
             self.src.insert("1.0", text)
