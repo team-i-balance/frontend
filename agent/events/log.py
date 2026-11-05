@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS events(
 def classify(action: str, reason: str | None, max_confidence: float) -> str:
     if action == "missed_report":
         return "missed"
-    if action in ("sent_sanitized", "cancelled", "route_internal") and reason is None:
+    if action in ("sent_sanitized", "cancelled", "route_internal", "file_sanitized", "file_blocked") and reason is None:
         return "pre_warning"
     if reason == "false_positive":
         return "tuning"

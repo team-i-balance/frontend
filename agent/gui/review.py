@@ -9,7 +9,7 @@ import tkinter as tk
 from collections import Counter
 from tkinter import ttk
 
-from ..detect.pipeline import detect
+from ..detect.pipeline import COVERAGE_LABELS, detect
 from ..detect.scoring import overall_grade
 from ..detect.span import CATEGORY, TYPE_LABELS
 from ..sanitize.engine import ALLOWED, STRATEGY_LABELS, make_items, sanitize
@@ -66,6 +66,8 @@ class ReviewWindow(tk.Toplevel):
         self.manual: list[tuple[str, str]] = []
         self.ignored_types: list[str] = []
         self.items = []
+        self.notes: list[str] = []
+        self.coverage = "rules"
         self.result = None
         self.grade = "O"
         self._refresh_job = None
@@ -116,6 +118,8 @@ class ReviewWindow(tk.Toplevel):
         rbar.pack(fill="x", pady=(0, 4))
         self.out_info = tk.Label(rbar, text="", font=theme.SMALL, fg=theme.MUTED, bg=theme.BG)
         self.out_info.pack(side="left")
+        self.cov_info = tk.Label(rbar, text="", font=theme.SMALL, fg=theme.MUTED, bg=theme.BG)
+        self.cov_info.pack(side="right")
         self.out = theme.scrolled_text(right, state="disabled", cursor="arrow")
 
         table = ttk.LabelFrame(self, text=" 탐지 항목 · 행을 클릭해도 같은 메뉴가 열려요 ", padding=6)
@@ -164,8 +168,9 @@ class ReviewWindow(tk.Toplevel):
     def refresh(self) -> None:
         self._refresh_job = None
         text = self.orig.get("1.0", "end-1c")
-        det = detect(text, self.app.base, self.app.ignore, self.manual)
+        det = detect(text, self.app.base, self.app.ignore, self.manual, model=self.app.detector())
         self.notes = det.notes
+        self.coverage = det.coverage
         self.items = make_items(det, self.decisions)
         self.result = sanitize(text, self.items, self.app.session)
         self.grade = overall_grade(self.items)
@@ -222,6 +227,17 @@ class ReviewWindow(tk.Toplevel):
         applied = sum(1 for it in self.items if it.applied and not it.is_blocker)
         deleted = sum(1 for it in self.items if it.applied and it.strategy == "delete")
         self.out_info.configure(text=f"변환 {applied}건 (삭제 {deleted}건은 변환문에 표시되지 않아요)" if applied else "")
+        self.cov_info.configure(**self._coverage_label())
+
+    def _coverage_label(self) -> dict:
+        """어느 단계까지 검사했는지 (모델이 꺼져 있거나 실패하면 그대로 알린다)."""
+        if self.coverage == "model_failed":
+            return {"text": "검사: 규칙·사전만 · 소형 모델 실패", "fg": theme.SUSPECT_FG}
+        if self.coverage == "model_skipped":
+            return {"text": "검사: 규칙·사전만 · 글이 길어 소형 모델 생략", "fg": theme.SUSPECT_FG}
+        if self.coverage == "rules" and self.app.models.state == "loading":
+            return {"text": "검사: 규칙·사전 · 소형 모델 준비 중", "fg": theme.MUTED}
+        return {"text": f"검사: {COVERAGE_LABELS[self.coverage]}", "fg": theme.MUTED}
 
     def _state_text(self, it) -> tuple[str, str]:
         if it.is_blocker:
@@ -270,6 +286,7 @@ class ReviewWindow(tk.Toplevel):
                     lines.append(f"• {it.span.reason}")
             lines.append("→ 해당 부분을 클릭해 '이 부분 빼고 보내기'를 고르면 외부 AI에 보낼 수 있어요. "
                          "그대로 써야 하면 사내 AI를 이용하세요.")
+            lines += [f"• {n}" for n in self.notes]
             self.b_actions.pack(fill="x")
             self.btn_send.configure(text="외부 전송 차단됨", state="disabled")
         elif self.grade == "S":
@@ -283,6 +300,7 @@ class ReviewWindow(tk.Toplevel):
             self.btn_send.configure(text="변환문 복사  (Ctrl+Enter)", state="normal")
         else:
             self.b_title.configure(text="공개 · 민감정보가 보이지 않아요")
+            lines += [f"• {n}" for n in self.notes]
             lines.append("그대로 보내도 됩니다. 놓친 정보가 있으면 드래그 후 우클릭으로 가릴 수 있어요.")
             self.btn_send.configure(text="그대로 복사  (Ctrl+Enter)", state="normal")
         self.b_detail.configure(text="\n".join(lines))

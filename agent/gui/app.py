@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from .. import config
+from ..detect.model import ModelManager
 from ..detect.pipeline import detect
 from ..detect.scoring import AUTO_APPLY
 from ..events.log import EventLog
@@ -17,6 +18,7 @@ from ..sanitize.engine import Session
 from ..sanitize.restore import restore
 from ..system import autostart, win32
 from . import theme, tray
+from .file_window import FileWindow
 from .restore_window import RestoreWindow
 from .review import ReviewWindow
 from .samples import SAMPLES
@@ -26,9 +28,13 @@ HOTKEYS = {
     1: (win32.MOD_CONTROL | win32.MOD_ALT, ord("P"), "Ctrl+Alt+P 점검 창"),
     2: (win32.MOD_CONTROL | win32.MOD_ALT, ord("R"), "Ctrl+Alt+R 답변 복원"),
     3: (win32.MOD_CONTROL | win32.MOD_ALT, ord("O"), "Ctrl+Alt+O 설정"),
+    4: (win32.MOD_CONTROL | win32.MOD_ALT, ord("F"), "Ctrl+Alt+F 파일 검사"),
 }
 PAUSE_SECONDS = 30 * 60
 MAX_CLIP_LEN = 50_000
+# 복사할 때마다 도는 자동 점검은 짧은 글에만 모델을 쓴다 (메인 스레드를 오래 잡지 않게).
+# 긴 글은 규칙·사전으로 창을 띄울지 정하고, 창을 직접 열면 모델로 다시 검사한다.
+CLIP_MODEL_MAX_CHARS = 2000
 
 
 class App:
@@ -48,9 +54,15 @@ class App:
         self.reviews: list[ReviewWindow] = []
         self.restore_win: RestoreWindow | None = None
         self.settings_win: SettingsWindow | None = None
+        self.file_win: FileWindow | None = None
         self._last_seq = win32.clipboard_sequence()
         self._own_seq = None
         self._toast_win = None
+
+        # 2단계 소형 모델: 백그라운드에서 불러오고, 준비되기 전에는 규칙·사전만 쓴다
+        self.models = ModelManager(on_change=lambda: self.post("model_state"))
+        self._announce_model = False
+        self.models.configure(config.model_dir(self.settings), self.settings["model_threads"])
 
         self.tray = tray.Tray(self) if tray.available() else None
         self.hotkeys = win32.HotkeyThread(HOTKEYS, lambda hid: self.post("hotkey", hid))
@@ -79,6 +91,19 @@ class App:
 
     def save_settings(self) -> None:
         config.save_settings(self.settings)
+
+    def detector(self):
+        """지금 쓸 수 있는 2단계 모델 (없으면 None → 규칙·사전만)."""
+        return self.models.detector()
+
+    def set_model(self, folder: str | None = None, enabled: bool = True) -> None:
+        """설정 창에서 모델 폴더를 고르거나 끌 때."""
+        if folder is not None:
+            self.settings["model_dir"] = folder
+        self.settings["model_enabled"] = enabled
+        self.save_settings()
+        self._announce_model = True
+        self.models.configure(config.model_dir(self.settings), self.settings["model_threads"])
 
     def _state_changed(self) -> None:
         if self.tray:
@@ -124,10 +149,33 @@ class App:
                 self.paused_until = time.time() + PAUSE_SECONDS
                 self.toast("30분 동안 감시를 멈춰요.")
             self._state_changed()
+        elif cmd == "files":
+            self.open_files()
         elif cmd == "hotkey":
-            {1: lambda: self.open_review("", "hotkey"), 2: self.open_restore, 3: self.open_settings}[args[0]]()
+            {1: lambda: self.open_review("", "hotkey"), 2: self.open_restore, 3: self.open_settings,
+             4: self.open_files}[args[0]]()
+        elif cmd == "model_state":
+            self._model_state_changed()
         elif cmd == "quit":
             self.quit()
+
+    def _model_state_changed(self) -> None:
+        state = self.models.state
+        if self._announce_model and state in ("ready", "error", "off"):
+            self._announce_model = False
+            if state == "ready":
+                self.toast("소형 모델을 켰어요. 이름·주소 등을 더 잘 찾아요.")
+            elif state == "error":
+                self.toast(f"소형 모델을 켜지 못했어요. {self.models.message}")
+            elif self.settings.get("model_enabled", True):
+                self.toast("모델 폴더를 먼저 지정하세요. 지금은 규칙·사전으로만 검사해요.")
+            else:
+                self.toast("소형 모델을 껐어요. 규칙·사전으로만 검사해요.")
+        elif state == "error":
+            print("model load error:", self.models.message)
+        self._state_changed()
+        for win in self.reviews:
+            win.refresh()  # 모델이 준비되면 열린 창도 다시 검사
 
     # ================================================================== 클립보드 감시
     def _watch_clipboard(self) -> None:
@@ -152,8 +200,9 @@ class App:
         if self.session.entries and restore(text, self.session.entries)[1]:
             self.open_restore(text)
             return
-        det = detect(text, self.base, self.ignore)
-        if det.blockers or any(s.confidence >= AUTO_APPLY for s in det.spans):
+        model = self.detector() if len(text) <= CLIP_MODEL_MAX_CHARS else None
+        det = detect(text, self.base, self.ignore, model=model)
+        if det.blockers or any(s.confidence >= AUTO_APPLY for s in det.spans) or det.coverage == "model_failed":
             self.open_review(text, "clipboard")
 
     def copy_to_clipboard(self, text: str) -> None:
@@ -198,6 +247,19 @@ class App:
 
     def settings_closed(self) -> None:
         self.settings_win = None
+
+    def open_files(self, path: str | None = None) -> None:
+        if self.file_win:
+            self.file_win.deiconify()
+            self.file_win.lift()
+            self.file_win.focus_force()
+        else:
+            self.file_win = FileWindow(self)
+        if path:
+            self.file_win.inspect(path)
+
+    def files_closed(self) -> None:
+        self.file_win = None
 
     # ================================================================== 알림
     def toast(self, message: str, ms: int = 3500) -> None:

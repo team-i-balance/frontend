@@ -26,6 +26,10 @@ TYPE_LABELS = {
     "classified": "기밀 표기",
     "source_code": "사내 소스코드",
     "other": "기타(직접 신고)",
+    # 2단계 소형 모델(AEGIS)이 추가로 찾는 유형
+    "dob": "생년월일",
+    "id_number": "신분증 번호",
+    "username": "계정 아이디",
 }
 
 # 하이라이트 색 묶음
@@ -39,6 +43,7 @@ CATEGORY = {
     "codename": "org", "client": "org", "internal_host": "org",
     "classified": "blocker", "source_code": "blocker",
     "other": "manual",
+    "dob": "quasi", "id_number": "identifier", "username": "contact",
 }
 
 
@@ -51,7 +56,7 @@ class Span:
     confidence: float
     grade: str = "S"
     reason: str = ""
-    source: str = "rule"  # rule / lexicon / base / manual
+    source: str = "rule"  # rule / lexicon / base / model / manual / known
 
     @property
     def key(self) -> tuple[str, str]:

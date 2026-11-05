@@ -4,8 +4,8 @@ from __future__ import annotations
 from .span import Span
 
 AUTO_APPLY = 0.6       # 이 이상이면 자동 변환, 미만은 하이라이트만 ("확인 필요")
-QUASI = {"age", "address", "school", "grade_class"}
-QUASI_LABEL = {"age": "나이", "address": "지역", "school": "학교", "grade_class": "학년·반"}
+QUASI = {"age", "address", "school", "grade_class", "dob"}
+QUASI_LABEL = {"age": "나이", "address": "지역", "school": "학교", "grade_class": "학년·반", "dob": "생년월일"}
 
 
 def reident_boost(spans: list[Span]) -> list[str]:

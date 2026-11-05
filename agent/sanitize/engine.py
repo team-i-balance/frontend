@@ -8,8 +8,10 @@ from __future__ import annotations
 import hmac
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
+from datetime import date
 
 from ..detect import lexicon, scoring
 from ..detect.span import Span
@@ -30,12 +32,14 @@ ALLOWED = {
     "client": ["replace", "tag"], "internal_host": ["tag", "delete"],
     "classified": ["block", "delete"], "source_code": ["block", "delete"],
     "other": ["tag", "delete"],
+    "dob": ["generalize", "delete", "tag"], "id_number": ["delete", "tag"], "username": ["tag", "delete"],
 }
 
 _FIXED_TAGS = {"rrn": "[주민번호]", "frn": "[외국인번호]", "card": "[카드번호]", "bizno": "[사업자번호]",
                "account": "[계좌번호]", "phone": "[전화번호]", "email": "[이메일]", "ip": "[IP]",
                "secret": "[비밀값]", "address": "[주소]", "school": "[학교]", "internal_host": "[사내도메인]",
-               "other": "[가림]"}
+               "other": "[가림]", "dob": "[생년월일]", "id_number": "[신분증번호]", "username": "[계정]"}
+FIXED_TAG_VALUES = frozenset(_FIXED_TAGS.values())
 # 태그 중 복원 가능한 것 (같은 값 → 같은 태그, A/B/C 구분)
 _COUNTER_TAGS = {"name": "이름", "codename": "프로젝트", "client": "고객사"}
 
@@ -48,20 +52,35 @@ _JOSA_TAIL = re.compile(
 
 # ====================================================================== 세션 (매핑 저장소)
 class Session:
-    """같은 원문 → 같은 가짜 값. HMAC(세션키, 원문)을 시드로 풀에서 고른다."""
+    """같은 원문 → 같은 가짜 값. HMAC(세션키, 원문)을 시드로 풀에서 고른다.
+
+    점검 창(메인 스레드)과 파일 검사(작업 스레드)가 같은 매핑을 쓰므로 값 발급은 잠금 안에서 한다.
+    """
 
     def __init__(self, base: dict):
         self.base = base
+        self._lock = threading.RLock()
         self.reset()
 
     def reset(self) -> None:
-        self._key = os.urandom(32)
-        self._fwd: dict[tuple, str] = {}
-        self._used: set[str] = set()
-        self._counters: dict[str, int] = {}
-        self._seq = 0
-        self.entries: list[tuple[str, str, str]] = []  # (가짜 값, 원래 값, 종류 plain/phone/given)
-        self.created = time.time()
+        with self._lock:
+            self._key = os.urandom(32)
+            self._fwd: dict[tuple, str] = {}
+            self._used: set[str] = set()
+            self._counters: dict[str, int] = {}
+            self._seq = 0
+            self.entries: list[tuple[str, str, str]] = []  # (가짜 값, 원래 값, 종류 plain/phone/given)
+            self.created = time.time()
+
+    def known_values(self) -> list[tuple[str, str]]:
+        """이 세션에서 가린 (유형, 원래 값). 파일 검사에서 다른 칸에 같은 값이 있으면 함께 가린다."""
+        with self._lock:
+            return [(typ, value) for (_, typ, value) in self._fwd]
+
+    def fakes(self) -> set[str]:
+        """이 세션이 만든 가짜 값과 태그 (재검사에서 우리가 넣은 값은 민감정보로 보지 않는다)."""
+        with self._lock:
+            return set(self._fwd.values()) | FIXED_TAG_VALUES
 
     def _seed(self, typ: str, value: str) -> int:
         digest = hmac.new(self._key, f"{typ}:{value}".encode(), "sha256").digest()
@@ -72,6 +91,14 @@ class Session:
             self.entries.append((fake, original, kind))
 
     def fake_for(self, typ: str, value: str, text: str) -> str:
+        with self._lock:
+            return self._fake_for(typ, value, text)
+
+    def tag_for(self, typ: str, value: str) -> str:
+        with self._lock:
+            return self._tag_for(typ, value)
+
+    def _fake_for(self, typ: str, value: str, text: str) -> str:
         key = ("replace", typ, value)
         if key in self._fwd:
             return self._fwd[key]
@@ -93,7 +120,7 @@ class Session:
         elif typ == "client":
             fake = fakes.pick(fakes.CLIENTS, seed, taken)
         else:
-            return self.tag_for(typ, value)
+            return self._tag_for(typ, value)
         self._fwd[key] = fake
         self._used.add(fake)
         self._remember(fake, value, "phone" if typ == "phone" else "plain")
@@ -101,7 +128,7 @@ class Session:
             self._remember(fake[1:], value[1:], "given")  # "서윤아", "서윤 씨" 같은 이름만 부르기
         return fake
 
-    def tag_for(self, typ: str, value: str) -> str:
+    def _tag_for(self, typ: str, value: str) -> str:
         if typ not in _COUNTER_TAGS:
             return _FIXED_TAGS.get(typ, "[가림]")
         key = ("tag", typ, value)
@@ -170,6 +197,8 @@ def generalize(typ: str, value: str, base: dict) -> str:
     if typ == "grade_class":
         m = re.match(r"(\d{1,2})\s?학년", value)
         return f"{m.group(1)}학년" if m else "[학년]"
+    if typ == "dob":
+        return _decade_of_birth(value)
     if typ == "school":
         kind = base.get("schools", {}).get(value)
         if kind:
@@ -180,6 +209,20 @@ def generalize(typ: str, value: str, base: dict) -> str:
                 return word
         return "고등학교"
     return "[가림]"
+
+
+def _decade_of_birth(value: str) -> str:
+    """생년월일 → 'OO년대생'. 연도를 못 읽으면 태그로."""
+    m = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)", value)
+    if m:
+        year = int(m.group(1))
+    else:  # "95년 3월", "950315", "95.03.15"
+        m = re.match(r"\s*(\d{2})(?:\d{4}(?!\d)|\s*[년./-])", value)
+        if not m:
+            return "[생년월일]"
+        yy = int(m.group(1))
+        year = 2000 + yy if 2000 + yy <= date.today().year else 1900 + yy
+    return f"{year // 10 * 10}년대생"
 
 
 def _replacement(it: Item, session: Session, text: str) -> str:

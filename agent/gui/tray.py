@@ -38,6 +38,7 @@ class Tray:
         menu = pystray.Menu(
             pystray.MenuItem("프롬프트 점검 창 열기  (Ctrl+Alt+P)", lambda: post("review"), default=True),
             pystray.MenuItem("답변 복원 창  (Ctrl+Alt+R)", lambda: post("restore")),
+            pystray.MenuItem("파일 검사 · 엑셀 보호본  (Ctrl+Alt+F)", lambda: post("files")),
             pystray.MenuItem("예시로 점검해보기", pystray.Menu(*sample_items)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("감시 켜기", lambda: post("toggle"), checked=lambda item: app.settings["monitoring"]),
