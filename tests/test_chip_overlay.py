@@ -1,6 +1,9 @@
-"""원래 입력창 칩: 마스킹 / 원문유지 → 바뀔 값·사유 칩 → 입력창의 그 자리만 바꾼다. 새 창은 열지 않는다."""
+"""원래 입력창 칩: 마스킹 / 원문유지 → 바뀔 값·사유 칩 → 입력창의 그 자리만 바꾼다. 새 창은 열지 않는다.
+
+이 파일 이름은 test_native_overlay보다 앞에 오게 둔다: macOS에서는 Tk가 NSApplication을 먼저 만들어야 한다."""
 
 import queue
+import sys
 import time
 import tkinter as tk
 import unittest
@@ -67,6 +70,16 @@ class FakeReader:
 class OverlayChipTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if sys.platform == "darwin":
+            # Tk needs its own NSApplication. The app always starts Tk first; a test that made one with PyObjC can't.
+            try:
+                import AppKit
+
+                current = AppKit.NSApp() if callable(getattr(AppKit, "NSApp", None)) else None
+            except ImportError:
+                current = None
+            if current is not None and type(current).__name__ != "TKApplication":
+                raise unittest.SkipTest("NSApplication already exists without Tk in this process")
         try:
             cls.root = tk.Tk()
         except tk.TclError:
