@@ -205,3 +205,9 @@ macOS에서 Python 3.10 이상과 tkinter가 준비되면 가상환경을 만들
 macOS의 시스템 설정에서 앱이 요청하는 입력 모니터링 등 권한을 확인한다. 권한을 거부하면 자동 감시나 전역 단축키가 제한될 수 있으며 직접 입력으로 점검할 수 있다. 전역 단축키 입력은 다른 앱에도 전달될 수 있다.
 
 자동 테스트: `python -m unittest discover -s tests -t . -v`. CI는 macOS와 Windows에서 각각 실행한다. GUI, 실제 모델, 권한 승인 및 로그인 흐름은 자동 테스트만으로 확인되지 않는다. 원문과 매핑을 외부로 전송하지 않는 조건을 적용할 때는 실제 설정과 연결 대상을 별도로 확인한다.
+
+## macOS 앱 빌드
+
+macOS에서 Python 가상환경을 활성화하고 `pip install -r requirements.txt -r requirements-build.txt`를 실행한 뒤 `./build-macos.sh`로 `dist/KPGuard.app`을 만듭니다. 모델 파일은 앱에 포함되지 않으므로 별도로 로컬에 준비해야 합니다.
+
+개발용 빌드는 서명 및 Apple 공증을 자동으로 수행하지 않습니다. 다른 Mac에 배포할 때는 개발자 인증서와 공증을 별도 준비하고 Gatekeeper 동작을 확인해야 합니다. 이 빌드는 실제 배포 환경에서 아직 검증되지 않았습니다.
