@@ -1,0 +1,13 @@
+{
+  "_comment": "시연용 가상 조직 베이스. 실제 조직 모드에서는 서명된 정책 번들에 해시로만 들어간다.",
+  "codenames": ["오로라", "블루문"],
+  "clients": ["한빛전자", "새솔제약"],
+  "schools": {"GSM": "고등학교", "광주소프트웨어마이스터고": "고등학교"},
+  "internal_domains": ["kpcorp.internal", "git.kpcorp.co.kr"],
+  "internal_code_markers": ["com.kpcorp", "@kpcorp/", "KPCORP_"],
+  "classified_markers": ["대외비", "사외비", "극비", "Confidential", "CONFIDENTIAL"],
+  "whitelist": {
+    "emails": ["help@kpcorp.co.kr"],
+    "phones": ["1588-0000"]
+  }
+}

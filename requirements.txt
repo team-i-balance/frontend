@@ -1,0 +1,16 @@
+# 앱은 표준 라이브러리(tkinter, sqlite3, ctypes)만으로 실행된다.
+# 아래는 기능별 선택 의존성이다. 없으면 그 기능만 꺼지고 나머지는 그대로 동작한다. build.ps1은 모두 넣어 빌드한다.
+
+# 트레이 아이콘 (없으면 설정 창 + 단축키로 대체)
+pystray==0.19.5
+pillow==12.2.0
+
+# 파일 검사: 엑셀(xlsx) 보호본 (팀 backend file_sanitizer와 같은 버전)
+openpyxl==3.1.5
+defusedxml==0.7.1
+
+# 2단계 소형 모델(AEGIS ONNX)을 이 PC에서 실행 (팀 backend local_ai와 같은 범위)
+# 모델 파일은 포함되지 않는다. 받은 모델 폴더를 설정 창에서 지정하거나 %LOCALAPPDATA%\KPGuard\models\aegis에 넣는다.
+numpy>=1.24,<3
+onnxruntime>=1.17,<2
+tokenizers>=0.20,<1
