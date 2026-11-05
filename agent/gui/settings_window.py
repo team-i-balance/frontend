@@ -328,10 +328,14 @@ class SettingsWindow(tk.Toplevel):
         self.after(100, watch)
 
         def wheel(event) -> None:
-            try:  # bind_all은 창을 닫아도 남는다: 이 창 안의 휠만, 닫힌 뒤에는 무시
-                if not self.winfo_exists() or event.widget.winfo_toplevel() is not self or not bar.winfo_ismapped():
+            try:  # bind_all은 창을 닫아도 남는다: 마우스가 이 창 위에 있을 때만, 닫힌 뒤에는 무시
+                if not self.winfo_exists() or not bar.winfo_ismapped():
                     return
-            except (tk.TclError, AttributeError):
+                # Windows는 휠을 포커스가 있는 위젯에 보낸다: 포커스 대신 마우스 아래 창으로 판단한다
+                under = self.winfo_containing(*self.winfo_pointerxy())
+                if under is None or under.winfo_toplevel() is not self:
+                    return
+            except (tk.TclError, AttributeError, KeyError):
                 return
             if getattr(event, "num", None) in (4, 5):
                 step = -1 if event.num == 4 else 1
