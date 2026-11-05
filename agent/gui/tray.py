@@ -14,7 +14,8 @@ except ImportError:  # 선택 의존성
 
 from .samples import SAMPLES
 
-_COLORS = {"on": "#16a34a", "paused": "#f59e0b", "off": "#9ca3af"}
+# 디자인 토큰의 상태색: 감시 중 = 성공(green/300), 일시정지 = 경고(amber/300), 꺼짐 = 비활성(gray/400)
+_COLORS = {"on": "#5BD38A", "paused": "#FFC55C", "off": "#6F727C"}
 
 
 def available() -> bool:
@@ -25,8 +26,8 @@ def _image(state: str):
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.polygon([(32, 4), (58, 14), (54, 42), (32, 60), (10, 42), (6, 14)], fill=_COLORS[state])
-    d.rectangle([22, 28, 42, 46], fill="white")
-    d.arc([24, 16, 40, 36], 180, 360, fill="white", width=4)
+    d.rectangle([22, 28, 42, 46], fill="#131416")
+    d.arc([24, 16, 40, 36], 180, 360, fill="#131416", width=4)
     return img
 
 

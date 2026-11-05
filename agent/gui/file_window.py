@@ -15,9 +15,7 @@ from ..detect.span import TYPE_LABELS
 from ..files.processor import FileReport, inspect_xlsx
 from . import theme
 
-INTRO = ("엑셀(.xlsx) 파일을 AI에 올리기 전에 검사하고, 민감정보를 가린 보호본을 만들어요.\n"
-         "숨긴 시트·행·열, 메모, 문서 속성까지 검사하고, 보호본에는 보이는 값만 남겨요. "
-         "파일은 이 PC 밖으로 나가지 않아요.")
+INTRO = "숨긴 시트·행·열, 메모, 문서 속성까지 검사하고 보호본에는 보이는 값만 남겨요. 파일은 이 PC 밖으로 나가지 않아요."
 
 
 def _counts(counter) -> str:
@@ -25,6 +23,8 @@ def _counts(counter) -> str:
 
 
 class FileWindow(tk.Toplevel):
+    """주요 버튼(앰버)은 지금 할 일 하나: 파일을 고르기 전에는 '파일 선택', 보호본이 준비되면 '보호본 저장'."""
+
     def __init__(self, app):
         super().__init__(app.root)
         self.app = app
@@ -33,40 +33,41 @@ class FileWindow(tk.Toplevel):
         self._q: queue.Queue = queue.Queue()
         self._busy = False
 
-        self.title("파일 검사 — KP Guard")
-        self.geometry("640x560")
-        self.minsize(560, 460)
-        self.configure(bg="white", padx=18, pady=14)
+        theme.window(self, "파일 검사 — KP Guard", 760, 660, 620, 520)
         self.protocol("WM_DELETE_WINDOW", self._close)
+        gap = theme.px(16)
 
-        tk.Label(self, text="파일 검사", font=theme.TITLE, bg="white", anchor="w").pack(fill="x")
         intro = INTRO
         if app.server_mode():
             intro += "\n서버 처리 모드여도 파일 검사는 아직 이 PC에서 해요 (서버 파일 API가 보호본 파일을 돌려주지 않아요)."
-        tk.Label(self, text=intro, font=theme.SMALL, bg="white", fg=theme.MUTED, anchor="w", justify="left",
-                 wraplength=590).pack(fill="x", pady=(2, 10))
-        row = tk.Frame(self, bg="white")
-        row.pack(fill="x")
-        self.btn_pick = theme.primary_button(row, "xlsx 파일 선택…", self.choose)
-        self.btn_pick.pack(side="left")
-        self.file_label = tk.Label(row, text="", font=theme.SMALL, bg="white", fg=theme.MUTED, anchor="w")
-        self.file_label.pack(side="left", padx=10, fill="x", expand=True)
+        pick = theme.Card(self, title="엑셀 파일 검사", caption=intro, fit=True)
+        pick.pack(fill="x", padx=gap, pady=(gap, 0))
+        pick.caption.configure(wraplength=theme.px(520))
+        self.btn_pick = theme.Button(pick.actions, "파일 선택", self.choose, kind="primary")
+        self.btn_pick.pack(side="right")
+        self.file_label = theme.label(pick.body, "아직 고른 파일이 없어요", "label14", theme.TEXT_TERTIARY)
+        self.file_label.pack(fill="x")
 
-        self.banner = tk.Frame(self, padx=14, pady=10, bg=theme.BG)
-        self.banner.pack(fill="x", pady=(12, 6))
-        self.b_title = tk.Label(self.banner, text="검사할 파일을 고르세요", font=theme.BOLD, bg=theme.BG,
-                                anchor="w", justify="left", wraplength=580)
-        self.b_title.pack(fill="x")
-        self.details = tk.Label(self, text="", font=theme.FONT, bg="white", anchor="nw", justify="left",
-                                wraplength=590)
-        self.details.pack(fill="both", expand=True)
+        self.banner = theme.Banner(self)
+        self.banner.pack(fill="x", padx=gap, pady=(theme.px(12), 0))
+        self.banner.set("neutral", "검사할 파일을 고르세요")
+        self.b_title = self.banner.title
 
-        bottom = tk.Frame(self, bg="white")
-        bottom.pack(fill="x", pady=(10, 0))
-        self.btn_save = theme.primary_button(bottom, "보호본 저장…", self.save)
+        bottom = tk.Frame(self, bg=theme.BG_CANVAS)
+        bottom.pack(side="bottom", fill="x", padx=gap, pady=(theme.px(8), gap))
+        self.btn_save = theme.Button(bottom, "보호본 저장", self.save)
         self.btn_save.configure(state="disabled")
         self.btn_save.pack(side="right")
-        theme.plain_button(bottom, "닫기", self._close).pack(side="right", padx=8)
+        theme.Button(bottom, "닫기", self._close, kind="ghost").pack(side="right", padx=theme.px(8))
+
+        result = theme.Card(self, title="검사 결과")
+        result.pack(fill="both", expand=True, padx=gap, pady=(theme.px(12), 0))
+        self.details = theme.label(result.body, "파일을 고르면 가린 값과 보호본에서 뺀 것이 여기에 나와요.", "body16r",
+                                   theme.TEXT_TERTIARY)
+        self.details.configure(anchor="nw")
+        self.details.pack(fill="both", expand=True)
+        result.bind("<Configure>", lambda e: self.details.configure(wraplength=max(theme.px(200), e.width - theme.px(64))),
+                    add="+")
         self.lift()
         self.focus_force()
 
@@ -85,8 +86,9 @@ class FileWindow(tk.Toplevel):
         self.report = None
         self.file_label.configure(text=self.source.name)
         self.btn_save.configure(state="disabled")
+        self.btn_save.set_kind("secondary")
         self.btn_pick.configure(state="disabled")
-        self._paint(theme.BG, "#111827", "검사 중… 칸이 많으면 시간이 걸릴 수 있어요", "")
+        self._paint("neutral", "검사 중… 칸이 많으면 시간이 걸릴 수 있어요", "")
         app = self.app
         args = (self.source, app.base, app.session)
         kwargs = {"ignore": frozenset(app.ignore), "model": app.detector()}
@@ -114,10 +116,9 @@ class FileWindow(tk.Toplevel):
         self.show(report)
 
     # ================================================================== 결과
-    def _paint(self, bg: str, fg: str, title: str, details: str) -> None:
-        self.banner.configure(bg=bg)
-        self.b_title.configure(bg=bg, fg=fg, text=title)
-        self.details.configure(text=details)
+    def _paint(self, tone: str, title: str, details: str) -> None:
+        self.banner.set(tone, title)
+        self.details.configure(text=details, fg=theme.TEXT_PRIMARY)
 
     def show(self, report: FileReport) -> None:
         self.report = report
@@ -126,11 +127,9 @@ class FileWindow(tk.Toplevel):
             s = report.summary
             changed = sum(report.found.values())
             if report.grade == "S":
-                title = f"민감 · 값 {changed}개를 가린 보호본을 만들었어요"
-                bg, fg = theme.GRADE["S"]
+                title, tone = f"민감 · 값 {changed}개를 가린 보호본을 만들었어요", "warning"
             else:
-                title = "공개 · 민감정보가 보이지 않아요. 값만 남긴 보호본을 만들었어요"
-                bg, fg = theme.GRADE["O"]
+                title, tone = "공개 · 민감정보가 보이지 않아요. 값만 남긴 보호본을 만들었어요", "success"
             if report.found:
                 lines.append(f"• 가린 값: {_counts(report.found)}")
             if report.hidden_found:
@@ -146,19 +145,20 @@ class FileWindow(tk.Toplevel):
             if report.grade == "S":
                 lines.append("• AI 답변에 나온 가짜 값은 '답변 복원'(Ctrl+Alt+R)에서 원래 값으로 바꿀 수 있어요.")
             self.btn_save.configure(state="normal")
+            self.btn_save.set_kind("primary")  # 지금 할 일: 저장
+            self.btn_pick.set_kind("secondary")
+            self.btn_pick.configure(text="다른 파일 선택")
         elif report.status == "BLOCKED":
-            title = "기밀 · 외부 AI 전송이 차단됐어요"
-            bg, fg = theme.GRADE["C"]
+            title, tone = "기밀 · 외부 AI 전송이 차단됐어요", "danger"
             lines.append(report.message)
             lines += [f"• {r}" for r in report.blocker_reasons[:5]]
             self._log("file_blocked", "C", report)
         else:
-            title = "보호본을 만들지 못했어요"
-            bg, fg = "#f3f4f6", "#374151"
+            title, tone = "보호본을 만들지 못했어요", "danger"
             lines.append(report.message or "알 수 없는 이유로 검사하지 못했어요.")
             lines.append("원본 파일을 그대로 올리지 마세요.")
         lines.append(f"\n검사: {COVERAGE_LABELS.get(report.coverage, report.coverage)}")
-        self._paint(bg, fg, title, "\n".join(lines))
+        self._paint(tone, title, "\n".join(lines))
 
     def save(self) -> None:
         if not self.report or self.report.status != "READY":
@@ -173,7 +173,7 @@ class FileWindow(tk.Toplevel):
     def save_to(self, path) -> bool:
         path = Path(path)
         if self.source and path.resolve() == self.source.resolve():
-            self.app.toast("원본 파일 위에는 저장할 수 없어요. 다른 이름을 고르세요.")
+            self.app.toast("원본 파일 위에는 저장할 수 없어요. 다른 이름을 고르세요")
             return False
         try:
             path.write_bytes(self.report.file_bytes)
@@ -181,7 +181,7 @@ class FileWindow(tk.Toplevel):
             self.app.toast(f"저장하지 못했어요: {exc.strerror or exc}")
             return False
         self._log("file_sanitized", self.report.grade, self.report)
-        self.app.toast(f"보호본을 저장했어요: {path.name}  이 파일을 AI에 올리세요.")
+        self.app.toast(f"보호본을 저장했어요: {path.name} · 이 파일을 AI에 올리세요")
         return True
 
     def _log(self, action: str, grade: str, report: FileReport) -> None:

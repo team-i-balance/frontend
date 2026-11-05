@@ -57,6 +57,7 @@ class ServerWork:
 
 class App:
     def __init__(self, background: bool = False):
+        theme.load_fonts()  # 동봉한 Pretendard (Tk를 만들기 전에)
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title("KP Guard")
@@ -381,15 +382,7 @@ class App:
     def toast(self, message: str, ms: int = 3500) -> None:
         if self._toast_win is not None:
             self._toast_win.destroy()
-        win = tk.Toplevel(self.root)
-        win.wm_overrideredirect(True)
-        win.attributes("-topmost", True)
-        tk.Label(win, text=message, bg="#111827", fg="white", font=theme.FONT, padx=14, pady=10,
-                 wraplength=360, justify="left").pack()
-        win.update_idletasks()
-        x = win.winfo_screenwidth() - win.winfo_width() - 24
-        y = win.winfo_screenheight() - win.winfo_height() - 72
-        win.geometry(f"+{x}+{y}")
+        win = theme.toast(self.root, message)  # 앰버 알약, 화면 아래 가운데
         self._toast_win = win
         win.after(ms, lambda: self._close_toast(win))
 

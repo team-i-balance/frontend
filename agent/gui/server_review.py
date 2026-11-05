@@ -13,7 +13,6 @@ import queue
 import threading
 import tkinter as tk
 from collections import Counter
-from tkinter import ttk
 from urllib.parse import urlsplit
 
 from ..detect import lexicon, rules
@@ -21,15 +20,16 @@ from ..detect.scoring import AUTO_APPLY
 from ..detect.span import TYPE_LABELS
 from ..events.log import REASON_PRIORITY
 from ..sanitize.restore import restore as local_restore
-from ..server.align import LABEL_CATEGORY, LABEL_TYPE, Repl, align, compose, premask, to_orig
+from ..server.align import LABEL_TYPE, Repl, align, compose, premask, to_orig
 from ..server.client import ServerError
 from ..system import win32
 from . import theme
-from .review import MISSED_TYPES, REASON_SHORT, REASONS, ReasonDialog, Tooltip, _short, shape_of
+from .restore_window import build_restore_layout
+from .review import MISSED_TYPES, REASON_SHORT, REASONS, ReasonDialog, Tooltip, _short, build_layout, shape_of
 
 ORG_TYPES = {"codename", "client", "internal_host"}
-HINT = "서버에서 검사해요 · 하이라이트나 표를 클릭하면 되돌릴 수 있어요 · 놓친 정보는 드래그 후 우클릭"
-NEUTRAL = ("#f3f4f6", "#111827")
+SERVER_COLUMNS = (("type", "유형", 120), ("orig", "원문", 180), ("repl", "보낼 값", 170),
+                  ("state", "상태", 190), ("why", "탐지", 330))
 
 
 def _host(app) -> str:
@@ -62,10 +62,7 @@ class ServerReviewWindow(tk.Toplevel):
         self._pending_click = None
         self.tip = Tooltip(self)
 
-        self.title("AI 전송 전 점검 (서버) — KP Guard")
-        self.geometry("1120x740")
-        self.minsize(880, 580)
-        self.configure(bg=theme.BG)
+        theme.window(self, "AI 전송 전 점검 (서버) — KP Guard", 1200, 840, 900, 640)
         self.protocol("WM_DELETE_WINDOW", self.on_cancel)
         self._build()
         if text:
@@ -77,61 +74,18 @@ class ServerReviewWindow(tk.Toplevel):
 
     # ================================================================== UI
     def _build(self) -> None:
-        self.banner = tk.Frame(self, padx=16, pady=10)
-        self.banner.pack(fill="x")
-        self.b_title = tk.Label(self.banner, font=theme.TITLE, anchor="w")
-        self.b_title.pack(fill="x")
-        self.b_detail = tk.Label(self.banner, font=theme.FONT, anchor="w", justify="left", wraplength=1050)
-        self.b_detail.pack(fill="x")
-        self.b_actions = tk.Frame(self.banner)
-        self.btn_retry = theme.plain_button(self.b_actions, "다시 시도", self.check)
-        self.btn_local = theme.plain_button(self.b_actions, "이 PC에서 검사", self.on_local)
-        self.btn_internal = theme.plain_button(self.b_actions, "사내 AI에서 처리", self.on_internal)
-
-        body = ttk.PanedWindow(self, orient="horizontal")
-        body.pack(fill="both", expand=True, padx=12, pady=(10, 4))
-        left = ttk.LabelFrame(body, text=" 원문 · 직접 입력하거나 수정할 수 있어요 ", padding=6)
-        right = ttk.LabelFrame(body, text=" AI에 보낼 변환문 (서버가 가린 글) ", padding=6)
-        body.add(left, weight=1)
-        body.add(right, weight=1)
-
-        bar = ttk.Frame(left)
-        bar.pack(fill="x", pady=(0, 4))
-        theme.plain_button(bar, "클립보드에서 불러오기", self._load_clipboard, small=True).pack(side="left")
-        theme.plain_button(bar, "모두 지우기", lambda: self.orig.delete("1.0", "end"), small=True).pack(side="left", padx=4)
-        self.orig = theme.scrolled_text(left, undo=True)
+        self.btn_send = None
+        build_layout(self, "AI에 보낼 변환문 (서버가 가린 글)", SERVER_COLUMNS)
+        self.btn_retry = theme.Button(self.b_actions, "다시 시도", self.check, size="sm")
+        self.btn_local = theme.Button(self.b_actions, "이 PC에서 검사", self.on_local, size="sm")
+        self.btn_internal = theme.Button(self.b_actions, "사내 AI에서 처리", self.on_internal, size="sm")
         self.orig.bind("<<Modified>>", self._on_modified)
         self.orig.bind("<Button-3>", self._on_right_click)
-
-        rbar = ttk.Frame(right)
-        rbar.pack(fill="x", pady=(0, 4))
-        self.out_info = tk.Label(rbar, text="", font=theme.SMALL, fg=theme.MUTED, bg=theme.BG)
-        self.out_info.pack(side="left")
-        self.cov_info = tk.Label(rbar, text="", font=theme.SMALL, fg=theme.MUTED, bg=theme.BG)
-        self.cov_info.pack(side="right")
-        self.out = theme.scrolled_text(right, state="disabled", cursor="arrow")
-
-        table = ttk.LabelFrame(self, text=" 탐지 항목 · 행을 클릭해도 같은 메뉴가 열려요 ", padding=6)
-        table.pack(fill="x", padx=12, pady=4)
-        cols = (("type", "유형", 120), ("orig", "원문", 210), ("repl", "보낼 값", 170),
-                ("state", "상태", 160), ("why", "탐지", 330))
-        self.tree = ttk.Treeview(table, columns=[c[0] for c in cols], show="headings", height=6, selectmode="none")
-        for cid, label, width in cols:
-            self.tree.heading(cid, text=label)
-            self.tree.column(cid, width=width, anchor="w", stretch=cid == "why")
-        self.tree.tag_configure("reverted", foreground=theme.MUTED)
-        self.tree.tag_configure("blocker", foreground="#b71c1c")
-        self.tree.pack(fill="x")
         self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
-
-        bottom = tk.Frame(self, bg=theme.BG)
-        bottom.pack(fill="x", padx=12, pady=(6, 12))
-        tk.Label(bottom, text=HINT, font=theme.SMALL, fg=theme.MUTED, bg=theme.BG).pack(side="left")
-        self.btn_send = theme.primary_button(bottom, "변환문 복사", self.on_send)
+        self.btn_send = theme.Button(self.bottom, "변환문 복사", self.on_send, kind="primary")
         self.btn_send.pack(side="right")
-        theme.plain_button(bottom, "취소", self.on_cancel).pack(side="right", padx=8)
-        tk.Button(bottom, text="원문 그대로 사용", command=self.on_original, relief="flat", bg=theme.BG,
-                  fg=theme.MUTED, font=theme.SMALL, cursor="hand2").pack(side="right", padx=8)
+        theme.Button(self.bottom, "취소", self.on_cancel).pack(side="right", padx=theme.px(8))
+        theme.Button(self.bottom, "원문 그대로 사용", self.on_original, kind="ghost").pack(side="right")
         self.bind("<Control-Return>", lambda e: self.on_send())
         self.bind("<Escape>", lambda e: self.on_cancel())
 
@@ -288,23 +242,22 @@ class ServerReviewWindow(tk.Toplevel):
         self._clear_marks(self.orig)
         text = self._text()
         marks = []
+        mark = {**theme.MARK, "font": theme.F["mark16"]}  # 가린 원문 표시
         if self._fresh():
             for it in self.items:
                 if it.exact:
-                    style = ({"background": theme.REVERTED_BG, "underline": True} if it.token in self.reverted
-                             else {"background": theme.HIGHLIGHT[LABEL_CATEGORY.get(it.label, "manual")]})
+                    style = dict(theme.KEPT) if it.token in self.reverted else mark
                     marks.append((it.start, it.end, style, ("t", it.token)))
         for s in self.org:
-            style = ({"background": theme.REVERTED_BG, "underline": True} if s.value in self.org_reverted
-                     else {"background": theme.HIGHLIGHT["org"]})
+            style = dict(theme.KEPT) if s.value in self.org_reverted else mark
             marks.append((s.start, s.end, style, ("o", s.value)))
         for i, (_, value) in enumerate(self.manual):
             start = text.find(value)
             while start >= 0:
-                marks.append((start, start + len(value), {"background": theme.HIGHLIGHT["manual"]}, ("m", i)))
+                marks.append((start, start + len(value), mark, ("m", i)))
                 start = text.find(value, start + len(value))
         for i, b in enumerate(self.blockers):
-            style = {"background": theme.REVERTED_BG if b.key in self.released else theme.HIGHLIGHT["blocker"]}
+            style = dict(theme.KEPT) if b.key in self.released else {**theme.BLOCKED, "font": theme.F["mark16"]}
             marks.append((b.start, b.end, style, ("b", i)))
         for n, (s, e, style, key) in enumerate(marks):
             tag = f"k{n}"
@@ -319,7 +272,6 @@ class ServerReviewWindow(tk.Toplevel):
         self.out.configure(state="normal")
         self.out.delete("1.0", "end")
         self._clear_marks(self.out)
-        labels = {it.token: it.label for it in self.items}
         for n, (chunk, mark) in enumerate(self.segs):
             if mark is None:
                 self.out.insert("end", chunk)
@@ -327,11 +279,11 @@ class ServerReviewWindow(tk.Toplevel):
             tag = f"k{n}"
             kind, ref = mark
             if kind == "token":
-                style, key = {"background": theme.HIGHLIGHT[LABEL_CATEGORY.get(labels.get(ref), "manual")]}, ("t", ref)
+                style, key = dict(theme.SAFE), ("t", ref)
             elif kind == "reverted":
-                style, key = {"background": theme.REVERTED_BG, "underline": True}, ("t", ref)
+                style, key = dict(theme.RAW), ("t", ref)  # 원문 그대로 나감
             else:
-                style, key = {"background": theme.HIGHLIGHT["org" if ref == "org" else "manual"]}, None
+                style, key = dict(theme.SAFE), None
             self.out.insert("end", chunk, (tag,))
             self.out.tag_configure(tag, **style)
             if key:
@@ -339,18 +291,17 @@ class ServerReviewWindow(tk.Toplevel):
         self.out.configure(state="disabled")
         masked = sum(1 for _, m in self.segs if m and m[0] in ("token", "extra"))
         self.out_info.configure(text=f"가린 곳 {masked}곳" if masked else "")
-        self.cov_info.configure(**self._coverage_label())
+        self.cov_info.set(*self._coverage_label())
 
-    def _coverage_label(self) -> dict:
-        warn = theme.SUSPECT_FG
-        insecure = " · HTTP(암호화 안 됨)" if self.app.server and self.app.server.insecure else ""
+    def _coverage_label(self) -> tuple[str, str]:
+        insecure = " · HTTP" if self.app.server and self.app.server.insecure else ""
         if self.loading:
-            return {"text": f"서버에서 검사 중…{insecure}", "fg": theme.MUTED}
+            return f"서버에서 검사 중{insecure}", "neutral"
         if self.result is None:
-            return {"text": "검사: 서버 연결 안 됨" if self.error else "", "fg": warn}
+            return ("서버 연결 안 됨", "danger") if self.error else ("", "neutral")
         if self.result.rules_only or self.result.confidence != "high":
-            return {"text": f"검사: 서버 규칙만 (이름·주소 미검사){insecure}", "fg": warn}
-        return {"text": f"검사: 서버 모델+규칙{insecure}", "fg": warn if insecure else theme.MUTED}
+            return f"서버 규칙만 · 이름·주소 미검사{insecure}", "warning"
+        return f"검사: 서버 모델+규칙{insecure}", "warning" if insecure else "neutral"
 
     def _rows(self):
         """(키, 유형, 원문, 보낼 값, 상태, 탐지 근거, 표 태그)"""
@@ -362,26 +313,26 @@ class ServerReviewWindow(tk.Toplevel):
             if not it.exact:
                 state, value, tag = "위치 불명 · 되돌릴 수 없음", "(원문 위치를 확정하지 못함)", ""
             elif it.token in self.reverted:
-                state, value, tag = f"되돌림 · {REASON_SHORT[self.reverted[it.token]]}", it.value, "reverted"
+                state, value, tag = f"되돌림 · {REASON_SHORT[self.reverted[it.token]]}", theme.masked(it.value), "muted"
             else:
-                state, value, tag = "적용", it.value, ""
+                state, value, tag = "적용", theme.masked(it.value), ""
             repl = "(원문 유지)" if it.token in self.reverted else it.token
             why = "서버 탐지 · " + ("규칙" if self.result and self.result.rules_only else "모델+규칙")
             rows.append((("t", it.token), it.label, value, repl, state, why, tag))
         for s in self.org:
             reverted = s.value in self.org_reverted
-            rows.append((("o", s.value), TYPE_LABELS[s.type], s.value,
+            rows.append((("o", s.value), TYPE_LABELS[s.type], theme.masked(s.value),
                          "(원문 유지)" if reverted else self.app.session.tag_for(s.type, s.value),
                          f"되돌림 · {REASON_SHORT[self.org_reverted[s.value]]}" if reverted else "적용 (서버로 안 보냄)",
-                         s.reason, "reverted" if reverted else ""))
+                         s.reason, "muted" if reverted else ""))
         for i, (typ, value) in enumerate(self.manual):
-            rows.append((("m", i), TYPE_LABELS.get(typ, "기타"), value, "[가림]", "적용 (직접 신고)",
+            rows.append((("m", i), TYPE_LABELS.get(typ, "기타"), theme.masked(value), "[가림]", "적용 (직접 신고)",
                          "사용자가 직접 지정", ""))
         for i, b in enumerate(self.blockers):
             released = b.key in self.released
             rows.append((("b", i), TYPE_LABELS[b.type], b.value, "—",
                          f"차단 해제 · {REASON_SHORT[self.released[b.key]]}" if released else "차단",
-                         b.reason, "reverted" if released else "blocker"))
+                         b.reason, "muted" if released else "danger"))
         return rows
 
     def _fill_table(self) -> None:
@@ -393,54 +344,46 @@ class ServerReviewWindow(tk.Toplevel):
                              values=(typ, _short(value or ""), _short(repl), state, why))
 
     def _update_banner(self) -> None:
+        """톤: 빨강=기밀·오류, 노랑=민감, 초록=공개, 중립=검사 중·빈 글. 버튼은 오른쪽."""
         g = self.grade()
         res = self.result
         lines = []
-        self.b_actions.pack_forget()
         for b in (self.btn_retry, self.btn_local, self.btn_internal):
             b.pack_forget()
         if g == "C":
-            bg, fg = theme.GRADE["C"]
-            title = "기밀 · 외부 AI 전송이 차단됐어요"
+            tone, title = "danger", "기밀 · 외부 AI 전송이 차단됐어요"
             lines += [f"• {b.reason}" for b in self._active_blockers()]
             lines.append("→ 해당 부분을 클릭해 '이 부분 빼고 다시 검사'를 고르면 외부 AI에 보낼 수 있어요. "
                          "그대로 써야 하면 사내 AI를 이용하세요.")
-            self.btn_internal.pack(side="left", pady=(6, 0))
-            self.b_actions.pack(fill="x")
+            self.btn_internal.pack(side="right")
             self.btn_send.configure(text="외부 전송 차단됨", state="disabled")
         elif self.loading:
-            bg, fg = NEUTRAL
-            title = "서버에서 검사 중…"
+            tone, title = "neutral", "서버에서 검사 중…"
             lines.append(f"{_host(self.app)}에 보내 검사하고 있어요.")
-            self.btn_send.configure(text="변환문 복사  (Ctrl+Enter)", state="disabled")
+            self.btn_send.configure(text="변환문 복사", state="disabled")
         elif self.error is not None:
-            bg, fg = NEUTRAL
-            title = "서버에서 검사하지 못했어요"
+            tone, title = "danger", "서버에서 검사하지 못했어요"
             lines += [self.error.message, "다시 시도하거나 이 PC에서 검사하세요."]
-            self.btn_retry.pack(side="left", pady=(6, 0))
-            self.btn_local.pack(side="left", padx=6, pady=(6, 0))
-            self.b_actions.pack(fill="x")
-            self.btn_send.configure(text="변환문 복사  (Ctrl+Enter)", state="disabled")
+            self.btn_local.pack(side="right")
+            self.btn_retry.pack(side="right", padx=(0, theme.px(8)))
+            self.btn_send.configure(text="변환문 복사", state="disabled")
         elif res is None:
-            bg, fg = NEUTRAL
-            title = "검사할 프롬프트를 붙여넣거나 입력하세요"
-            self.btn_send.configure(text="변환문 복사  (Ctrl+Enter)", state="disabled")
+            tone, title = "neutral", "검사할 프롬프트를 붙여넣거나 입력하세요"
+            self.btn_send.configure(text="변환문 복사", state="disabled")
         else:
             if g == "O":
-                bg, fg = theme.GRADE["O"]
-                title = "공개 · 민감정보가 보이지 않아요"
-                self.btn_send.configure(text="그대로 복사  (Ctrl+Enter)", state="normal")
+                tone, title = "success", "공개 · 민감정보가 보이지 않아요"
+                self.btn_send.configure(text="그대로 복사", state="normal")
             else:
-                bg, fg = theme.GRADE["C" if g == "C2" else "S"]
+                tone = "danger" if g == "C2" else "warning"
                 if g == "C2":
                     title = f"기밀 · 비밀값을 포함해 {res.detected_count}곳을 서버에서 가렸어요"
+                    lines.append("• API 키·토큰·비밀번호가 있어요. 변환문에서는 가렸고, 답변을 복원해도 되돌리지 않아요.")
                 elif res.detected_count:
                     title = f"민감 · 개인정보 {res.detected_count}곳을 서버에서 가렸어요"
                 else:
                     title = f"민감 · {len({r.value for r in self.repls})}곳을 이 PC에서 가렸어요"
-                if g == "C2":
-                    lines.append("• API 키·토큰·비밀번호가 있어요. 변환문에서는 가렸고, 답변을 복원해도 되돌리지 않아요.")
-                self.btn_send.configure(text="변환문 복사  (Ctrl+Enter)", state="normal")
+                self.btn_send.configure(text="변환문 복사", state="normal")
             org = {r.value for r in self.repls if r.kind == "org"}
             if org:
                 lines.append(f"• 조직 베이스(코드네임·고객사·사내 도메인) {len(org)}건은 서버로 보내기 전에 이 PC에서 가렸어요.")
@@ -457,10 +400,7 @@ class ServerReviewWindow(tk.Toplevel):
                 lines.append("변환문을 복사해 붙여넣으세요. AI 답변은 검사 후 10분 안에 '답변 복원'으로 한 번 되돌릴 수 있어요.")
         if self.app.server and self.app.server.insecure:
             lines.append("• 서버 연결이 암호화되지 않았어요(HTTP). 실제 개인정보로 쓰기 전에 HTTPS로 바꿔야 해요.")
-        for w in (self.banner, self.b_title, self.b_detail, self.b_actions):
-            w.configure(bg=bg)
-        self.b_title.configure(text=title, fg=fg)
-        self.b_detail.configure(text="\n".join(lines), fg=fg)
+        self.banner.set(tone, title, "\n".join(lines))
 
     # ================================================================== 클릭 → 사용자 행동
     def _describe(self, key) -> str:
@@ -500,7 +440,7 @@ class ServerReviewWindow(tk.Toplevel):
             self._open_menu(self._row_keys[row], event.x_root, event.y_root)
 
     def _reason_menu(self, parent: tk.Menu, apply) -> tk.Menu:
-        sub = tk.Menu(parent, tearoff=0)
+        sub = theme.menu(parent)
         for code, label in REASONS:
             sub.add_command(label=label, command=lambda c=code: apply(c))
         return sub
@@ -508,12 +448,12 @@ class ServerReviewWindow(tk.Toplevel):
     def _open_menu(self, key, x: int, y: int) -> None:
         self.tip.hide()
         kind, ref = key
-        m = tk.Menu(self, tearoff=0)
+        m = theme.menu(self)
         if kind == "t":
             it = next((i for i in self.items if i.token == ref), None)
             if it is None:
                 return
-            m.add_command(label=f"{it.label} · {_short(it.value or '(위치 불명)', 30)}  →  {ref}", state="disabled")
+            m.add_command(label=f"{it.label} · {_short(theme.masked(it.value) if it.value else '(위치 불명)', 30)}  →  {ref}", state="disabled")
             m.add_separator()
             if not it.exact:
                 m.add_command(label="원문 위치를 확정하지 못해 되돌릴 수 없어요", state="disabled")
@@ -524,7 +464,7 @@ class ServerReviewWindow(tk.Toplevel):
                               menu=self._reason_menu(m, lambda c: self._set(self.reverted, ref, c)))
                 m.add_command(label="이 값은 앞으로 탐지하지 않기 (오탐 등록)", command=lambda: self._ignore(it.value, ref))
         elif kind == "o":
-            m.add_command(label=f"조직 베이스 · {_short(ref, 30)}", state="disabled")
+            m.add_command(label=f"조직 베이스 · {_short(theme.masked(ref), 30)}", state="disabled")
             m.add_separator()
             if ref in self.org_reverted:
                 m.add_command(label="다시 가리기", command=lambda: self._set(self.org_reverted, ref, None, recheck=True))
@@ -566,16 +506,16 @@ class ServerReviewWindow(tk.Toplevel):
 
     # ================================================================== 놓친 정보 신고
     def _on_right_click(self, event) -> None:
-        m = tk.Menu(self, tearoff=0)
+        m = theme.menu(self)
         try:
             selected = self.orig.get("sel.first", "sel.last").strip()
         except tk.TclError:
             selected = ""
         if selected:
-            sub = tk.Menu(m, tearoff=0)
+            sub = theme.menu(m)
             for typ, label in MISSED_TYPES:
                 sub.add_command(label=label, command=lambda t=typ, v=selected: self._report(t, v))
-            m.add_cascade(label=f"이것도 가려줘 · 놓친 정보 신고  “{_short(selected, 16)}”", menu=sub)
+            m.add_cascade(label=f"이것도 가려줘 · 놓친 정보 신고  “{_short(theme.masked(selected), 16)}”", menu=sub)
             m.add_separator()
         m.add_command(label="붙여넣기", command=lambda: self.orig.event_generate("<<Paste>>"))
         m.add_command(label="복사", command=lambda: self.orig.event_generate("<<Copy>>"))
@@ -690,45 +630,23 @@ class ServerReviewWindow(tk.Toplevel):
 
 
 class ServerRestoreWindow(tk.Toplevel):
-    """AI 답변 속 서버 자리표시([이름_1] 등)를 서버에서 원래 값으로 되돌린다. 서버 작업당 한 번만 된다."""
+    """AI 답변 속 서버 자리표시([이름_1] 등)를 서버에서 원래 값으로 되돌린다. 서버 작업당 한 번만 된다.
+
+    주요 버튼(앰버)은 하나이고 지금 할 일을 따른다: 복원 전에는 '서버에서 복원', 복원한 뒤에는 '복원 결과 복사'.
+    """
 
     def __init__(self, app, text: str = ""):
         super().__init__(app.root)
         self.app = app
         self.result = ""
         self._q: queue.Queue = queue.Queue()
-        self.title("답변 복원 (서버) — KP Guard")
-        self.geometry("980x600")
-        self.configure(bg=theme.BG)
+        theme.window(self, "답변 복원 (서버) — KP Guard", 1080, 680, 820, 520)
         self.protocol("WM_DELETE_WINDOW", self._close)
-
-        head = tk.Frame(self, bg="#eef2ff", padx=16, pady=10)
-        head.pack(fill="x")
-        tk.Label(head, text="AI 답변 복원 (서버)", font=theme.TITLE, bg="#eef2ff", fg="#1e3a8a", anchor="w").pack(fill="x")
-        self.info = tk.Label(head, bg="#eef2ff", fg="#1e3a8a", anchor="w", justify="left")
-        self.info.pack(fill="x")
-
-        body = ttk.PanedWindow(self, orient="horizontal")
-        body.pack(fill="both", expand=True, padx=12, pady=10)
-        left = ttk.LabelFrame(body, text=" AI 답변 (자리표시 포함) ", padding=6)
-        right = ttk.LabelFrame(body, text=" 복원 결과 · 파란 밑줄 = 원래 값으로 되돌린 부분 ", padding=6)
-        body.add(left, weight=1)
-        body.add(right, weight=1)
-        theme.plain_button(left, "클립보드에서 불러오기", self._paste, small=True).pack(anchor="w", pady=(0, 4))
-        self.src = theme.scrolled_text(left, undo=True)
-        tk.Frame(right, height=26).pack()
-        self.dst = theme.scrolled_text(right, state="disabled")
-        self.dst.tag_configure("restored", foreground=theme.RESTORED_FG, underline=True)
-
-        bottom = tk.Frame(self, bg=theme.BG)
-        bottom.pack(fill="x", padx=12, pady=(0, 12))
-        tk.Label(bottom, text="서버는 검사 후 10분 안에 한 번만 복원해요. 비밀값(API 키·비밀번호)은 되돌리지 않아요.",
-                 font=theme.SMALL, fg=theme.MUTED, bg=theme.BG).pack(side="left")
-        self.btn_copy = theme.primary_button(bottom, "복원 결과 복사", self._copy)
-        self.btn_copy.pack(side="right")
-        self.btn_run = theme.plain_button(bottom, "서버에서 복원", self.run)
-        self.btn_run.pack(side="right", padx=8)
-        theme.plain_button(bottom, "닫기", self._close).pack(side="right")
+        build_restore_layout(self, "AI 답변 (자리표시 포함)",
+                             "서버는 검사 후 10분 안에 한 번만 복원해요. 비밀값(API 키·비밀번호)은 되돌리지 않아요")
+        self.btn_run = theme.Button(self.bottom, "서버에서 복원", self.run, kind="primary")
+        self.btn_run.pack(side="right")
+        theme.Button(self.bottom, "닫기", self._close, kind="ghost").pack(side="right", padx=theme.px(8))
         if text:
             self.src.insert("1.0", text)
         self._update_info()
@@ -736,16 +654,21 @@ class ServerRestoreWindow(tk.Toplevel):
         self.focus_force()
         self.after(100, self._poll)
 
-    def _update_info(self, note: str = "", restored: bool = False) -> None:
+    def _update_info(self, note: str = "", restored: bool = False, failed: bool = False) -> None:
         work = self.app.server_work
-        if restored:
-            msg = "서버에서 원래 값으로 복원했어요 · 이 작업은 서버에서 지워져 다시 복원할 수 없어요"
+        if failed:
+            tone, title, msg = "danger", "서버에서 복원하지 못했어요", ""
+        elif restored:
+            tone, title = "success", "서버에서 원래 값으로 복원했어요"
+            msg = "이 작업은 서버에서 지워져 다시 복원할 수 없어요"
         elif work and work.alive():
             left = int(work.expires_in() // 60)
+            tone, title = "neutral", "AI 답변 복원 (서버)"
             msg = f"마지막으로 보낸 변환문의 매핑으로 복원해요 · 서버 보관 약 {left}분 남음 · 한 번 복원하면 서버에서 지워져요"
         else:
-            msg = "서버에 복원할 작업이 없어요. 변환문을 보낸 뒤 10분 안에만 복원할 수 있어요 (조직 베이스 태그는 이 PC에서 복원)."
-        self.info.configure(text=msg + (f"\n{note}" if note else ""))
+            tone, title = "neutral", "서버에 복원할 작업이 없어요"
+            msg = "변환문을 보낸 뒤 10분 안에만 복원할 수 있어요. 조직 베이스 태그는 이 PC에서 복원해요."
+        self.banner.set(tone, title, "\n".join(x for x in (msg, note) if x))
 
     def run(self) -> None:
         reply = self.src.get("1.0", "end-1c")
@@ -766,7 +689,7 @@ class ServerRestoreWindow(tk.Toplevel):
                 res, err = None, exc
             except Exception:
                 res, err = None, ServerError("서버 요청 중 오류가 났어요.")
-            self._q.put((reply, res, err))
+            self._q.put((reply, work, res, err))
 
         threading.Thread(target=job, daemon=True, name="server-restore").start()
 
@@ -774,13 +697,15 @@ class ServerRestoreWindow(tk.Toplevel):
         if not self.winfo_exists():
             return
         try:
-            reply, res, err = self._q.get_nowait()
+            reply, work, res, err = self._q.get_nowait()
         except queue.Empty:
             self.after(100, self._poll)
             return
         self.btn_run.configure(state="normal", text="서버에서 복원")
         if err is not None:
-            self._show(reply, reply, f"서버 복원 실패: {err.message}")
+            if err.kind in ("unreachable", "failed") and work.alive() and self.app.server_work is None:
+                self.app.server_work = work  # 서버에 닿지 못했으면 작업이 남아 있으니 다시 시도할 수 있다
+            self._show(reply, reply, err.message, failed=True)
         else:
             note = f"그대로 둔 비밀값 {len(res.blocked)}개" if res.blocked else ""
             if res.unknown:
@@ -788,7 +713,7 @@ class ServerRestoreWindow(tk.Toplevel):
             self._show(reply, res.text, note, restored=True)
         self.after(100, self._poll)
 
-    def _show(self, reply: str, server_text: str, note: str, restored: bool = False) -> None:
+    def _show(self, reply: str, server_text: str, note: str, restored: bool = False, failed: bool = False) -> None:
         """서버 결과에 이 PC의 매핑(조직 베이스 태그)까지 되돌리고, 서버가 바꾼 곳에 밑줄을 긋는다."""
         text, local_ranges = local_restore(server_text, self.app.session.entries)
         ranges = local_ranges if server_text == reply else [
@@ -800,7 +725,9 @@ class ServerRestoreWindow(tk.Toplevel):
         for s, e in ranges:
             self.dst.tag_add("restored", theme.index(s), theme.index(e))
         self.dst.configure(state="disabled")
-        self._update_info(note, restored)
+        self._update_info(note, restored, failed)
+        if not failed:  # 지금 할 일이 '복사'로 바뀐다
+            self.btn_run.configure(text="복원 결과 복사", command=self._copy)
 
     def _paste(self) -> None:
         text = win32.get_clipboard_text()
@@ -811,7 +738,7 @@ class ServerRestoreWindow(tk.Toplevel):
     def _copy(self) -> None:
         if self.result:
             self.app.copy_to_clipboard(self.result)
-            self.app.toast("복원 결과를 복사했어요.")
+            self.app.toast("복원 결과를 복사했어요")
 
     def _close(self) -> None:
         self.app.restore_closed(self)
