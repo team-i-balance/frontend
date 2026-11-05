@@ -35,6 +35,13 @@ jobs:
         if: runner.os == 'Windows'
         run: python tools/smoke_windows_package.py dist/KPGuard/KPGuard.exe
       - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Windows'
+        with:
+          name: chip-screenshots
+          path: smoke-artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
           name: KPGuard-Windows-x64

@@ -35,11 +35,12 @@ def _host(app) -> str:
 
 
 class ServerReviewWindow(tk.Toplevel):
-    def __init__(self, app, text: str = "", source: str = "manual", selected=None):
+    def __init__(self, app, text: str = "", source: str = "manual", selected=None, choice=None):
         super().__init__(app.root)
         self.app = app
         self.source = source
         self.overlay_selection = selected
+        self.overlay_choice = choice  # ("keep", 사유) / ("mask", None): 화면 칩에서 이미 고른 처리
         self.result = None            # ProcessResult
         self.result_text = ""         # 결과를 받은 원문
         self.items = []               # align() 결과
@@ -269,7 +270,10 @@ class ServerReviewWindow(tk.Toplevel):
             self._bind_mark(self.orig, tag, key)
             if self.overlay_selection == (s, e):
                 self.overlay_selection = None
-                self.after_idle(lambda target=key, start=s: theme.open_at_mark(self, start, target))
+                if self.overlay_choice:
+                    self.after_idle(lambda target=key, start=s: self._apply_choice(target, start))
+                else:
+                    self.after_idle(lambda target=key, start=s: theme.open_at_mark(self, start, target))
             if key[0] == "b":
                 self.orig.tag_lower(tag)
         self.orig.tag_raise("sel")
@@ -495,6 +499,22 @@ class ServerReviewWindow(tk.Toplevel):
             m.tk_popup(x, y)
         finally:
             m.grab_release()
+
+    def _apply_choice(self, key, start: int) -> None:
+        """화면 칩에서 고른 처리(원문 유지+사유 / 가린 채로)를 반영하고 그 자리를 보여 준다."""
+        choice, reason = self.overlay_choice
+        self.overlay_choice = None
+        if not self.winfo_exists():
+            return
+        self.orig.see(theme.index(start))
+        reason = reason if choice == "keep" else None
+        kind, ref = key
+        if kind == "t" and any(it.token == ref and it.exact for it in self.items):
+            self._set(self.reverted, ref, reason)
+        elif kind == "o":
+            self._set(self.org_reverted, ref, reason, recheck=True)
+        elif kind == "b":
+            self._set(self.released, self.blockers[ref].key, reason)
 
     def _set(self, store: dict, key, reason, recheck: bool = False) -> None:
         """recheck: 서버로 보낼 글이 바뀌는 변경(이 PC에서 미리 가린 값)이면 서버에 다시 묻는다."""

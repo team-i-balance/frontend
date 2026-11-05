@@ -81,11 +81,12 @@ def build_layout(win, out_title: str, cols=LOCAL_COLUMNS):
 
 
 class ReviewWindow(tk.Toplevel):
-    def __init__(self, app, text: str = "", source: str = "manual", selected=None):
+    def __init__(self, app, text: str = "", source: str = "manual", selected=None, choice=None):
         super().__init__(app.root)
         self.app = app
         self.source = source
         self.overlay_selection = selected
+        self.overlay_choice = choice  # ("keep", 사유) / ("mask", None): 화면 칩에서 이미 고른 처리
         self.decisions: dict[tuple, dict] = {}
         self.manual: list[tuple[str, str]] = []
         self.ignored_types: list[str] = []
@@ -196,7 +197,10 @@ class ReviewWindow(tk.Toplevel):
             self._bind_tag(self.orig, tag, i)
             if self.overlay_selection == (it.span.start, it.span.end):
                 self.overlay_selection = None
-                self.after_idle(lambda idx=i, start=it.span.start: theme.open_at_mark(self, start, idx))
+                if self.overlay_choice:
+                    self.after_idle(lambda item=it: self._apply_choice(item))
+                else:
+                    self.after_idle(lambda idx=i, start=it.span.start: theme.open_at_mark(self, start, idx))
             if it.is_blocker:
                 self.orig.tag_lower(tag)  # 블록 안의 개별 항목이 위에 보이고 먼저 클릭되도록
         self.orig.tag_raise("sel")
@@ -365,6 +369,18 @@ class ReviewWindow(tk.Toplevel):
             m.tk_popup(x, y)
         finally:
             m.grab_release()
+
+    def _apply_choice(self, it) -> None:
+        """화면 칩에서 고른 처리를 그대로 반영하고 그 자리를 보여 준다."""
+        kind, reason = self.overlay_choice
+        self.overlay_choice = None
+        if not self.winfo_exists():
+            return
+        self.orig.see(theme.index(it.span.start))
+        if kind == "keep":
+            self._decide(it, applied=False, reason=reason)
+        elif not it.applied:
+            self._decide(it, applied=True)
 
     def _decide(self, it, **change) -> None:
         d = self.decisions.setdefault(it.span.key, {})

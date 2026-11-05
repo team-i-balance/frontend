@@ -288,7 +288,7 @@ class Reader:
                     if visible:
                         yield visible
 
-        return Snapshot((hwnd, kind, tuple(field.GetRuntimeId()), url), draft, ranges)
+        return Snapshot((hwnd, kind, tuple(field.GetRuntimeId()), url), draft, ranges, viewport)
 
 
 class WNDCLASS(C.Structure):
@@ -359,6 +359,10 @@ class Paint:
         for hwnd in self.handles[len(regions) :]:
             self.show(hwnd, 0)
 
+    @staticmethod
+    def chip_surface():
+        return ChipSurface()
+
     def pointer(self):
         point = W.POINT()
         user.GetCursorPos(C.byref(point))
@@ -379,3 +383,118 @@ class Paint:
             self.destroy(hwnd)
         api(user, "UnregisterClassW", W.BOOL, W.LPCWSTR, W.HINSTANCE)(self.name, self.instance)
         api(gdi, "DeleteObject", W.BOOL, W.HANDLE)(self.brush)
+
+
+class BITMAPINFOHEADER(C.Structure):
+    _fields_ = [
+        ("size", W.DWORD),
+        ("width", W.LONG),
+        ("height", W.LONG),
+        ("planes", W.WORD),
+        ("bits", W.WORD),
+        ("compression", W.DWORD),
+        ("image", W.DWORD),
+        ("xppm", W.LONG),
+        ("yppm", W.LONG),
+        ("used", W.DWORD),
+        ("important", W.DWORD),
+    ]
+
+
+class BLENDFUNCTION(C.Structure):
+    _fields_ = [("op", C.c_ubyte), ("flags", C.c_ubyte), ("alpha", C.c_ubyte), ("format", C.c_ubyte)]
+
+
+class ChipSurface:
+    """A per-pixel-alpha window for the chips. It takes clicks (so the page below never gets them)
+    but never becomes the foreground window, so the browser keeps the caret in the prompt."""
+
+    NAME = "KPGuardChip"
+    registered = False
+
+    def __init__(self):
+        self.instance = api(kernel, "GetModuleHandleW", W.HMODULE, W.LPCWSTR)(None)
+        if not ChipSurface.registered:
+            hand = api(user, "LoadCursorW", W.HANDLE, W.HINSTANCE, C.c_void_p)(None, C.c_void_p(32649))
+            wc = WNDCLASS(
+                proc=C.cast(user.DefWindowProcW, C.c_void_p), instance=self.instance, cursor=hand, name=self.NAME
+            )
+            if not api(user, "RegisterClassW", W.ATOM, C.POINTER(WNDCLASS))(C.byref(wc)):
+                error = C.get_last_error()
+                if error != 1410:  # already registered
+                    raise C.WinError(error)
+            ChipSurface.registered = True
+        create = api(
+            user,
+            "CreateWindowExW",
+            W.HWND,
+            W.DWORD,
+            W.LPCWSTR,
+            W.LPCWSTR,
+            W.DWORD,
+            C.c_int,
+            C.c_int,
+            C.c_int,
+            C.c_int,
+            W.HWND,
+            W.HMENU,
+            W.HINSTANCE,
+            C.c_void_p,
+        )
+        # WS_EX_LAYERED | TOOLWINDOW | NOACTIVATE | TOPMOST, WS_POPUP. Not TRANSPARENT: it takes clicks.
+        self.hwnd = create(0x08080088, self.NAME, "", 0x80000000, 0, 0, 1, 1, None, None, self.instance, None)
+        if not self.hwnd:
+            raise C.WinError(C.get_last_error())
+        self.screen = api(user, "GetDC", W.HDC, W.HWND)(None)
+        self.dc = api(gdi, "CreateCompatibleDC", W.HDC, W.HDC)(self.screen)
+        self.section = api(
+            gdi, "CreateDIBSection", W.HBITMAP, W.HDC, C.c_void_p, W.UINT, C.POINTER(C.c_void_p), W.HANDLE, W.DWORD
+        )
+        self.select = api(gdi, "SelectObject", W.HGDIOBJ, W.HDC, W.HGDIOBJ)
+        self.delete = api(gdi, "DeleteObject", W.BOOL, W.HGDIOBJ)
+        self.update = api(
+            user,
+            "UpdateLayeredWindow",
+            W.BOOL,
+            W.HWND,
+            W.HDC,
+            C.POINTER(W.POINT),
+            C.POINTER(W.SIZE),
+            W.HDC,
+            C.POINTER(W.POINT),
+            W.DWORD,
+            C.POINTER(BLENDFUNCTION),
+            W.DWORD,
+        )
+        self.move = api(user, "SetWindowPos", W.BOOL, W.HWND, W.HWND, C.c_int, C.c_int, C.c_int, C.c_int, W.UINT)
+        self.bitmap, self.bits, self.size, self.shown = None, C.c_void_p(), (0, 0), False
+
+    def present(self, image, x, y, alpha=255):
+        w, h = image.size
+        if (w, h) != self.size:
+            info = BITMAPINFOHEADER(C.sizeof(BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+            bits = C.c_void_p()
+            bitmap = self.section(self.dc, C.byref(info), 0, C.byref(bits), None, 0)
+            if not bitmap:
+                raise C.WinError(C.get_last_error())
+            self.select(self.dc, bitmap)
+            if self.bitmap:
+                self.delete(self.bitmap)
+            self.bitmap, self.bits, self.size = bitmap, bits, (w, h)
+        data = image.convert("RGBa").tobytes("raw", "BGRa")
+        C.memmove(self.bits, data, len(data))
+        blend = BLENDFUNCTION(0, 0, max(0, min(255, alpha)), 1)
+        self.update(
+            self.hwnd, self.screen, C.byref(W.POINT(x, y)), C.byref(W.SIZE(w, h)), self.dc,
+            C.byref(W.POINT(0, 0)), 0, C.byref(blend), 2,
+        )
+        # Stay above the word marks (also topmost) without taking focus.
+        self.move(self.hwnd, -1, 0, 0, 0, 0, 0x0013 | (0 if self.shown else 0x0040))
+        self.shown = True
+
+    def close(self):
+        api(user, "DestroyWindow", W.BOOL, W.HWND)(self.hwnd)
+        api(gdi, "DeleteDC", W.BOOL, W.HDC)(self.dc)
+        if self.bitmap:
+            self.delete(self.bitmap)
+        api(user, "ReleaseDC", C.c_int, W.HWND, W.HDC)(None, self.screen)

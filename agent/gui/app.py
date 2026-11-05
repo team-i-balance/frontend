@@ -474,13 +474,14 @@ class App:
         self._last_seq = self._own_seq
 
     # ================================================================== 창 열기
-    def open_review(self, text: str = "", source: str = "manual", local: bool = False, selected=None) -> None:
+    def open_review(self, text: str = "", source: str = "manual", local: bool = False, selected=None,
+                    choice=None) -> None:
         """서버 처리 모드면 서버 점검 창, 아니면(또는 local=True면) 이 PC 엔진 점검 창."""
         if not text and self.reviews:  # 빈 창 요청이면 기존 창을 앞으로
             self.reviews[-1]._bring_front()
             return
         cls = ServerReviewWindow if self.server_mode() and not local else ReviewWindow
-        self.reviews.append(cls(self, text, source, selected=selected))
+        self.reviews.append(cls(self, text, source, selected=selected, choice=choice))
 
     def review_closed(self, win) -> None:
         if win in self.reviews:

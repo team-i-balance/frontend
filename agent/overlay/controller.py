@@ -2,11 +2,12 @@
 
 import sys
 import threading
-import tkinter as tk
 from contextlib import nullcontext
 from dataclasses import dataclass
 
 from ..gui import theme
+from ..gui.review import REASONS
+from .chips import Cascade, Menu, Option, TkSurface
 from .live import LiveRanges
 from .source import OWN_WINDOW
 
@@ -24,6 +25,7 @@ class Frame:
     key: tuple = ()
     text: str = ""
     marks: tuple = ()
+    area: tuple | None = None
 
     def hit(self, x, y):
         return next((m for m in self.marks if contains(m.bounds, x, y)), None)
@@ -41,7 +43,7 @@ def make_frame(source, spans):
             continue
         for box in source.rectangles(a, b):
             marks.append(Mark(box, a, b, span["label"]))
-    return Frame(source.key, source.draft.text, tuple(marks))
+    return Frame(source.key, source.draft.text, tuple(marks), getattr(source, "area", None))
 
 
 class NativeOverlay:
@@ -51,6 +53,7 @@ class NativeOverlay:
         self.live = LiveRanges(self._preview)
         self.frame = self.shown = Frame()
         self.chip = None
+        self.fading = []
         self.stage = "initializing"
         self.pressed = False
         self.press_at = None
@@ -142,72 +145,116 @@ class NativeOverlay:
                 self.shown = frame
             if frame.marks or self.chip or self.pressed:
                 self._mouse(frame, *self.paint.pointer())
+            self._animate()
         finally:
             if not self.stop.is_set():
-                self.timer = self.app.root.after(16 if self.shown.marks or self.chip else 50, self._tick)
+                busy = self.shown.marks or self.chip or self.fading
+                self.timer = self.app.root.after(16 if busy else 50, self._tick)
+
+    def _animate(self):
+        for cascade in [c for c in (self.chip, *self.fading) if c is not None]:
+            action = cascade.step()
+            if action is None:
+                try:
+                    cascade.present()
+                    continue
+                except Exception:  # a window that cannot be drawn is removed without running anything
+                    action = lambda: None  # noqa: E731
+            # The closing animation ended: remove the chips, then run the final choice.
+            if cascade is self.chip:
+                self.chip = None
+            if cascade in self.fading:
+                self.fading.remove(cascade)
+            cascade.surface.close()
+            if self.enabled():
+                action()
 
     def _mouse(self, frame, x, y, down):
+        if self.chip:
+            self.chip.move(x, y)
         if down and not self.pressed:
             if self.chip:
-                w = self.chip
-                left, top = w.winfo_rootx(), w.winfo_rooty()
-                if contains((left, top, left + w.winfo_width(), top + w.winfo_height()), x, y):
+                if self.chip.contains(x, y):
                     self.press_at = None
                     self.pressed = True
+                    self.chip.press_at(x, y)
                     return
+                same = self.chip.span
                 self._dismiss()
-            mark = frame.hit(x, y)
+                mark = frame.hit(x, y)
+                if mark and (frame.key, frame.text, mark.start, mark.end) == same:
+                    mark = None  # a second click on the same word only closes its chips
+            else:
+                mark = frame.hit(x, y)
             self.press_at = (frame.key, frame.text, mark.start, mark.end) if mark else None
         elif not down and self.pressed:
+            if self.chip and self.press_at is None:
+                self.chip.release_at(x, y)
             mark = frame.hit(x, y)
             if mark and self.press_at == (frame.key, frame.text, mark.start, mark.end):
                 self._open(frame, mark, x, y)
             self.press_at = None
         self.pressed = down
 
+    def _menu(self, frame, mark):
+        app, span = self.app, (mark.start, mark.end)
+        value = frame.text[mark.start : mark.end]
+
+        def review(choice=None):
+            return lambda: app.open_review(frame.text, "overlay", selected=span, choice=choice)
+
+        def ignore():
+            app.ignore.add(value)
+            self.clear()  # check the prompt again without this value
+            toast = getattr(app, "toast", None)
+            if toast:
+                toast("이 값은 앞으로 표시하지 않아요")
+
+        reasons = Menu("원문 유지 사유", [Option(text, review(("keep", code))) for code, text in REASONS])
+        item = Menu(
+            f"{mark.label} 처리",
+            [
+                Option("가린 채로 보내기", review(("mask", None))),
+                Option("원문 그대로 보내기", menu=reasons),
+                Option("오탐 등록 · 다시 표시 안 함", ignore),
+            ],
+        )
+        more = Menu(
+            "다른 기능",
+            [
+                Option("답변 복원", app.open_restore),
+                Option("파일 검사", app.open_files),
+                Option("서버 기능 전체", lambda: app.post("server_tools")),
+            ],
+        )
+        return Menu(
+            mark.label,
+            [
+                Option("이 항목 처리", menu=item),
+                Option("프롬프트 전체 점검", lambda: app.open_review(frame.text, "overlay")),
+                Option("다른 기능", menu=more),
+            ],
+            note=theme.masked(value),
+        )
+
     def _open(self, frame, mark, x, y):
         self._dismiss()
-        window = self.chip = tk.Toplevel(self.app.root)
-        window.withdraw()
-        window.overrideredirect(True)
-        window.attributes("-topmost", True)
-        window.configure(bg=theme.BG_RAISED, highlightthickness=1, highlightbackground=theme.AMBER_500)
-        theme.label(window, mark.label, "caption12", theme.AMBER_300).pack(anchor="w", padx=10, pady=(6, 2))
-
-        def action(callback):
-            def invoke():
-                self._dismiss()
-                if self.enabled():
-                    callback()
-
-            return invoke
-
-        options = [
-            (
-                "이 항목 가명화·원문 유지",
-                lambda: self.app.open_review(frame.text, "overlay", selected=(mark.start, mark.end)),
-            ),
-            ("프롬프트 전체 점검", lambda: self.app.open_review(frame.text, "overlay")),
-            ("답변 복원", self.app.open_restore),
-            ("파일 검사", self.app.open_files),
-            ("서버 기능 전체", lambda: self.app.post("server_tools")),
-        ]
-        for label, callback in options:
-            theme.Button(window, label, action(callback), size="sm").pack(fill="x", padx=5, pady=2)
-        window.bind("<Escape>", lambda _: self._dismiss())
-        window.update_idletasks()
-        # Keep the chip on the monitor containing the word, including monitors left of the primary.
-        left, top, right, bottom = self.paint.screen_at(x, y)
-        width, height = window.winfo_reqwidth(), window.winfo_reqheight()
-        px = max(left, min(x, right - width))
-        py = y + 8 if y + 8 + height <= bottom else max(top, y - height - 8)
-        window.geometry(f"+{px}+{py}")
-        window.deiconify()
-        window.lift()
+        make = getattr(self.paint, "chip_surface", None)
+        surface = make() if make else TkSurface(self.app.root)
+        # The whole word, also when it wraps onto a second line.
+        parts = [m.bounds for m in frame.marks if (m.start, m.end) == (mark.start, mark.end)] or [mark.bounds]
+        anchor = min(p[0] for p in parts), min(p[1] for p in parts), max(p[2] for p in parts), max(p[3] for p in parts)
+        scale = self.app.root.winfo_fpixels("1i") / 96
+        chip = Cascade(self._menu(frame, mark), anchor, frame.area, self.paint.screen_at(x, y), scale, surface)
+        chip.span = (frame.key, frame.text, mark.start, mark.end)
+        self.chip = chip
+        chip.step()
+        chip.present()
 
     def _dismiss(self):
         if self.chip is not None:
-            self.chip.destroy()
+            self.chip.close()
+            self.fading.append(self.chip)
             self.chip = None
 
     def close(self):
@@ -215,5 +262,7 @@ class NativeOverlay:
         self.live.close()
         if self.paint:
             self.app.root.after_cancel(self.timer)
-            self._dismiss()
+            for cascade in [c for c in (self.chip, *self.fading) if c is not None]:
+                cascade.surface.close()
+            self.chip, self.fading = None, []
             self.paint.close()

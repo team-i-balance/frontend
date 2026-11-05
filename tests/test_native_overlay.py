@@ -106,7 +106,7 @@ class LiveTests(unittest.TestCase):
 
     def test_mark_click_and_outside_preserve_the_same_frame(self):
         overlay = NativeOverlay.__new__(NativeOverlay)
-        overlay.pressed, overlay.press_at, overlay.chip = False, None, None
+        overlay.pressed, overlay.press_at, overlay.chip, overlay.fading = False, None, None, []
         overlay._open = Mock()
         bounds = (20, 20, 60, 40)
         frame = make_frame(
@@ -117,15 +117,35 @@ class LiveTests(unittest.TestCase):
         overlay._mouse(frame, 25, 25, False)
         overlay._open.assert_called_once_with(frame, frame.marks[0], 25, 25)
         chip = Mock()
-        chip.winfo_rootx.return_value = chip.winfo_rooty.return_value = 50
-        chip.winfo_width.return_value = chip.winfo_height.return_value = 20
+        chip.contains.side_effect = lambda x, y: 50 <= x < 70 and 50 <= y < 70
+        chip.span = (frame.key, frame.text, 0, 3)
         overlay.chip = chip
-        overlay._mouse(frame, 100, 100, True)
+        overlay._mouse(frame, 55, 55, True)  # on the chip: the chip handles it
+        overlay._mouse(frame, 55, 55, False)
+        chip.press_at.assert_called_once_with(55, 55)
+        chip.release_at.assert_called_once_with(55, 55)
+        overlay._mouse(frame, 100, 100, True)  # outside: chips animate away
         overlay._mouse(frame, 100, 100, False)
-        chip.destroy.assert_called_once()
+        chip.close.assert_called_once()
         self.assertIsNone(overlay.chip)
+        self.assertEqual(overlay.fading, [chip])
         self.assertEqual(frame.hit(25, 25), frame.marks[0])
         self.assertEqual(Frame().marks, ())
+
+    def test_second_click_on_the_same_word_only_closes(self):
+        overlay = NativeOverlay.__new__(NativeOverlay)
+        overlay.pressed, overlay.press_at, overlay.fading = False, None, []
+        overlay._open = Mock()
+        frame = make_frame(
+            Snapshot((7, "claude.ai"), Draft.plain("abc"), lambda a, b: [(20, 20, 60, 40)]),
+            [{"start": 0, "end": 3, "label": "이름"}],
+        )
+        overlay.chip = Mock(span=(frame.key, frame.text, 0, 3))
+        overlay.chip.contains.return_value = False
+        overlay._mouse(frame, 25, 25, True)
+        overlay._mouse(frame, 25, 25, False)
+        overlay._open.assert_not_called()
+        self.assertIsNone(overlay.chip)
 
 
 @unittest.skipUnless(sys.platform in ("win32", "darwin"), "native desktop API")

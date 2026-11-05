@@ -78,6 +78,7 @@ class Snapshot:
     rectangles: (
         object  # Callable(start, end) -> visible screen rectangles; called on the provider thread only.
     )
+    area: tuple | None = None  # the prompt box on screen (left, top, right, bottom), when known
 
 
 OWN_WINDOW = object()

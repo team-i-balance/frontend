@@ -34,6 +34,25 @@ def mouse(x, y, down):
         Q.CGEventPost(Q.kCGHIDEventTap, event)
 
 
+def win_foreground_kept(hwnd):
+    if sys.platform != "win32":
+        return True
+    from agent.overlay import windows as win
+
+    return win.foreground() == hwnd
+
+
+def capture(name):
+    """Screenshot for the CI artifact (Windows only)."""
+    if sys.platform != "win32":
+        return
+    from PIL import ImageGrab
+
+    folder = Path("smoke-artifacts")
+    folder.mkdir(exist_ok=True)
+    ImageGrab.grab(all_screens=True).save(folder / f"{name}.png")
+
+
 def activate_fixture(page, field):
     from agent.overlay import windows as win
 
@@ -176,6 +195,22 @@ def main():
                 finally:
                     mouse(*word, False)
                 until(lambda: overlay.chip is not None, "chip above the word")
+                # A row with more options opens the next chip and keeps the first one.
+                first = overlay.chip.cards[0]
+                rx0, ry0, rx1, ry1 = first.row_box(0)
+                row = (rx0 + rx1) // 2, (ry0 + ry1) // 2
+                assert first.ty + first.h <= y, "first chip covers the word"
+                mouse(*row, True)
+                time.sleep(0.08)
+                mouse(*row, False)
+                until(lambda: overlay.chip is not None and len(overlay.chip.cards) == 2, "next chip opened")
+                assert overlay.chip.cards[0].selected == 0
+                assert win_foreground_kept(hwnd), "clicking a chip took focus from the browser"
+                settle = time.monotonic() + 0.6
+                while time.monotonic() < settle:
+                    root.update()
+                    time.sleep(0.01)
+                capture(f"chip-{sys.argv[1] if len(sys.argv) > 1 else 'chrome'}")
                 # Click in the page margin above the editor, outside the chip.
                 margin = x - 24, y - 16
                 mouse(*margin, True)

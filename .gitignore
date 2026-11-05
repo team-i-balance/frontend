@@ -21,3 +21,4 @@ Thumbs.db
 # 모델 파일은 레포에 올리지 않는다 (AEGIS ONNX, SLM 등은 따로 받아 로컬 폴더로 지정)
 *.onnx
 /models/
+smoke-artifacts/
