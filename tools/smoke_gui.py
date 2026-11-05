@@ -4,9 +4,12 @@ python tools/smoke_gui.py
 
 - 파일 검사: openpyxl·defusedxml이 있으면 합성 xlsx로 보호본을 만들고 저장까지 해 본다.
 - 소형 모델: onnx·onnxruntime·tokenizers가 있으면 tests/toy_model.py의 가짜 모델을 켜고 점검 창이 쓰는지 본다.
-- 서버 처리: tests/fake_backend.py의 가짜 서버로 파일 검사(업로드 → 보호본 받기 → 저장)를 한 뒤
-  점검 → 되돌리기 → 변환문 전송 → 답변 복원을 해 본다. 파일 보호본과 같은 자리표시가 복원되면 경고가 나와야 한다.
-  실제 backend로 해 보려면 KPGUARD_SMOKE_SERVER=http://127.0.0.1:8000 처럼 주소를 준다 (합성 데이터만 보낸다).
+- 서버 처리: tests/fake_backend.py의 가짜 서버(HTTPS 자체 서명 인증서 + 토큰 인증, 팀 서버와 같은 방식)로
+  첫 연결(인증서 확인 필요) → 설정 창 '인증·인증서'에서 지문 확인·신뢰 → 틀린 팀 토큰(401) → 개발용 토큰으로 연결한 뒤,
+  파일 검사(업로드 → 보호본 받기 → 저장)와 점검 → 되돌리기 → 변환문 전송 → 답변 복원을 해 본다.
+  파일 보호본과 같은 자리표시가 복원되면 경고가 나와야 한다.
+  실제 backend로 해 보려면 KPGUARD_SMOKE_SERVER=https://127.0.0.1:8443 처럼 주소를 준다 (합성 데이터만 보낸다).
+  https면 서버가 보낸 인증서를 그대로 신뢰하고, 개발용 토큰을 쓴다 (backend DISABLE_DEV_TOKEN이 없어야 함).
 """
 import os
 import sys
@@ -17,6 +20,9 @@ from pathlib import Path
 os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="kpguard-smoke-")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+if sys.platform != "win32":
+    # Linux(xvfb-run) 등: pystray의 X11 트레이는 한글 창 제목을 받지 못한다. 트레이 없이(설정 창 + 단축키) 돈다
+    sys.modules["pystray"] = None
 
 from tkinter import messagebox  # noqa: E402
 
@@ -26,11 +32,11 @@ from agent.files import processor  # noqa: E402
 from agent.gui.app import App  # noqa: E402
 from agent.gui.samples import SAMPLES  # noqa: E402
 from tests import toy_model  # noqa: E402
-from tests.fake_backend import FakeBackend  # noqa: E402
+from tests.fake_backend import FakeBackend, fingerprint  # noqa: E402
 
 fake = None
 if not os.environ.get("KPGUARD_SMOKE_SERVER"):
-    fake = FakeBackend().start()
+    fake = FakeBackend(auth=True, tls="other").start()  # 팀 서버처럼 자체 서명 HTTPS + 토큰 인증
 os.environ["KPGUARD_SERVER_URL"] = os.environ.get("KPGUARD_SMOKE_SERVER") or fake.url
 
 app = App(background=False)
@@ -119,7 +125,7 @@ def files_step():
 def model_step():
     if not toy_model.deps_available():
         log.append(("소형 모델", "건너뜀: onnx·onnxruntime·tokenizers 없음"))
-        server_files_step()
+        server_auth_step()
         return
     folder = toy_model.build(work / "toy-aegis")
     app.set_model(str(folder))
@@ -134,9 +140,62 @@ def model_step():
         w.on_cancel()
         app.set_model(enabled=False)
         log.append(("모델 끔", app.models.state))
-        server_files_step()
+        server_auth_step()
 
     wait_for(lambda: app.models.state in ("ready", "error"), ready)
+
+
+def checked() -> bool:
+    return app.server_status not in ("확인 전", "확인 중…")
+
+
+def server_auth_step():
+    """첫 연결 → 인증서 지문 확인·신뢰 → 틀린 팀 토큰 → 개발용 토큰 (backend#10)."""
+    app.set_server("server")
+
+    def first():
+        error = app.server_error
+        log.append(("서버 첫 연결", app.server_status, error.kind if error else None))
+        if not app.server or app.server.cert_mode is None:  # HTTP(이 PC 안의 서버)는 인증서가 없다
+            wrong_token()
+            return
+        app.open_settings()
+        app.settings_win._open_auth()
+        dlg = app.settings_win.auth_dialog
+        wait_for(lambda: dlg.probed is not None or "읽지 못" in dlg.fp_label.cget("text"), lambda: trust(dlg))
+
+    def trust(dlg):
+        same = "가짜 서버 인증서와 같음" if fake and dlg.probed == fingerprint("other") else "실제 서버"
+        log.append(("서버 인증서 지문", dlg.fp_label.cget("text"), same, dlg.cert_warn.cget("text"),
+                    dlg.btn_trust.cget("text"), dlg.btn_trust.cget("state")))
+        dlg._trust()
+        log.append(("신뢰 뒤 대화상자", dlg.cert_state.cget("text")))
+        dlg.destroy()
+        wait_for(checked, trusted)
+
+    def trusted():
+        log.append(("인증서 신뢰 뒤", app.server_status, app.server.cert_mode, app.server.auth_mode))
+        wrong_token()
+
+    def wrong_token():
+        if app.set_auth("team", "bad token") is None:
+            log.append(("팀 토큰 형식 검사", "통과하면 안 됨"))
+        app.set_auth("team", "wrong-team-token")
+        wait_for(checked, back_to_dev)
+
+    def back_to_dev():
+        error = app.server_error
+        app.settings_win.refresh()
+        log.append(("틀린 팀 토큰", error.kind if error else None, app.settings_win.server_info.cget("text")))
+        app.set_auth("dev")
+        wait_for(checked, connected)
+
+    def connected():
+        app.settings_win.refresh()
+        log.append(("개발용 토큰", app.server_status, app.settings_win.server_info.cget("text")))
+        server_files_step()
+
+    wait_for(checked, first)
 
 
 def server_files_step():
