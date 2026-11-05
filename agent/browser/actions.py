@@ -585,16 +585,28 @@ class BrowserActions:
                     failed = str(exc)
                 except Exception:  # 예외 메시지에 원문이 섞일 수 있어 보여 주지 않는다
                     failed = "서버에 기록하지 못했어요."
+            context = app.decide_context("Claude (claude.ai)") if hasattr(app, "decide_context") else None
             for w in server_works:
-                action = "send_transformed" if any(p.server and p.key in w.applied for p in w.pieces) else "send_as_is"
+                masked_here = [p for p in w.pieces if p.server and p.key in w.applied]
+                # 원문으로 남긴 서버 자리표시. 하나라도 있으면 revert_original로 기록한다 (#25)
+                kept_here = sorted({p.repl for p in w.pieces if p.server and p.repl and p.key not in w.applied})
+                if not masked_here:
+                    action, reverted = "send_as_is", None
+                elif kept_here and kept:
+                    action, reverted = "revert_original", kept_here
+                else:
+                    action, reverted = "send_transformed", None
                 try:
-                    out = w.server.decide(w.result.work_id, action, reason)
+                    out = w.server.decide(w.result.work_id, action, reason, reverted=reverted, context=context)
                 except ServerError as exc:
                     failed = exc.message
                     continue
                 except Exception:
                     failed = "서버에 기록하지 못했어요."
                     continue
+                note = getattr(getattr(app, "reasons", None), "note", None)
+                if note is not None and hasattr(app, "post"):
+                    app.post("call", note, out, action)
                 if out.restore_available:
                     restorable.append(w)
         else:

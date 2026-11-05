@@ -32,6 +32,11 @@ DEFAULTS = {
     "auth_mode": "dev",
     "api_token": "",    # 팀 토큰. 이 PC 사용자 폴더의 설정 파일에 둔다 (DPAPI 보호는 태스크 24)
     "server_pins": {},  # "호스트:포트" → 신뢰한 서버 인증서 SHA-256 지문
+    # 서버 결정 기록에 함께 보내는 직원 정보 (backend#63). 비우면 보내지 않는다. KPGUARD_USER_ID·KPGUARD_DEPT로 덮어쓴다
+    "user_id": "",
+    "dept": "",
+    # 원문이 나간 결정의 서버 이벤트 번호 [{id, at}] — 보안팀이 사유를 다시 요청하면 받기 위해 (#24). 14일 보관
+    "reason_events": [],
 }
 
 
