@@ -101,10 +101,23 @@ class OverlayChipTests(unittest.TestCase):
             "w1", sent.replace(PHONE, "[전화번호_1]"), ["PHONE"], 1, "S", "high", 0, False)
         self.server.decide.return_value = DecideResult(None, True, "pre_warning")
         self.overlay = NativeOverlay(self.app)
-        self.overlay.paint = Mock(screen_at=lambda x, y: (0, 0, 1600, 1000))
-        self.addCleanup(self.overlay._dismiss)
+        # Windows·macOS start the real reader thread, ticker and Enter guard. These tests drive the chip directly.
+        self.overlay.stop.set()
+        self.addCleanup(self.stop_overlay)
+        self.overlay.paint = Mock(screen_at=lambda x, y: (0, 0, 1600, 1000), pointer=lambda: (0, 0, False))
+        self.overlay.platform = None
+
+    def stop_overlay(self):
+        overlay = self.overlay
+        overlay.live.close()
+        if overlay.guard is not None:
+            overlay.guard.stop()
+        if hasattr(overlay, "timer"):
+            self.root.after_cancel(overlay.timer)
+        overlay._dismiss()
 
     def frame(self, text):
+        time.sleep(0.05)  # let a just-stopped reader thread finish its last pass before the test sets the frame
         spans = self.app.browser_actions.preview(text, channel_of(KEY))["spans"]
         snap = Snapshot(KEY, Draft.plain(text), lambda a, b: [(100 + a * 8, 100, 100 + b * 8, 120)])
         frame = make_frame(snap, spans)
