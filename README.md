@@ -189,3 +189,9 @@ build.ps1 · KPGuard.spec   데스크톱 앱(exe) 빌드
   파일 검사는 main `4882ff0`(PR #17 보호본 다운로드)으로 업로드·한 번 받기·모델 없음(503)을 확인했다
 - 모든 예시 값은 합성 데이터
 - exe는 코드 서명이 없어 SmartScreen·백신 경고가 뜰 수 있고, 설치 프로그램은 아직 없다 (태스크 27)
+
+## macOS 앱 빌드
+
+macOS에서 Python 가상환경을 활성화하고 `pip install -r requirements.txt -r requirements-build.txt`를 실행한 뒤 `./build-macos.sh`로 `dist/KPGuard.app`을 만듭니다. 모델 파일은 앱에 포함되지 않으므로 별도로 로컬에 준비해야 합니다.
+
+개발용 빌드는 서명 및 Apple 공증을 자동으로 수행하지 않습니다. 다른 Mac에 배포할 때는 개발자 인증서와 공증을 별도 준비하고 Gatekeeper 동작을 확인해야 합니다. 이 빌드는 실제 배포 환경에서 아직 검증되지 않았습니다.
