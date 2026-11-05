@@ -47,3 +47,6 @@ else:
 
         def stop(self):
             pass
+
+if sys.platform == "darwin":
+    from .mac_hotkeys import HotkeyThread
