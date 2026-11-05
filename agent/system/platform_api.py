@@ -54,3 +54,4 @@ if sys.platform == "darwin":
     get_clipboard_text = _clipboard.get_clipboard_text
     set_clipboard_text = _clipboard.set_clipboard_text
     own_window_in_foreground = _clipboard.own_window_in_foreground
+    from .mac_hotkeys import HotkeyThread

@@ -39,6 +39,9 @@ HOTKEYS = {
     3: (platform_api.MOD_CONTROL | platform_api.MOD_ALT, ord("O"), "Ctrl+Alt+O 설정"),
     4: (platform_api.MOD_CONTROL | platform_api.MOD_ALT, ord("F"), "Ctrl+Alt+F 파일 검사"),
 }
+if sys.platform == "darwin":
+    HOTKEYS = {key: (mods, code, label.replace("Ctrl+Alt", "⌘+⌥")) for key, (mods, code, label) in HOTKEYS.items()}
+
 PAUSE_SECONDS = 30 * 60
 MAX_CLIP_LEN = 50_000
 # 서버에서 검사한 파일의 자리표시를 기억하는 시간 (값은 없이 [이름_1] 같은 글자만).
