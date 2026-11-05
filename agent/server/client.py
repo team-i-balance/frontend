@@ -475,7 +475,7 @@ class ServerClient:
             self.model_available = health.model
         return health
 
-    def process(self, text: str) -> ProcessResult:
+    def _detect_request(self, path: str, text: str):
         """서버에 모델이 없다고 알고 있으면 처음부터 규칙만 모드로 보낸다 (글을 두 번 보내지 않게)."""
         stale = self.last_health is None or time.time() - self.last_health.checked_at > HEALTH_RECHECK_SECONDS
         if self.model_available is False and stale:
@@ -485,16 +485,31 @@ class ServerClient:
                 pass
         rules_only = self.model_available is False
         try:
-            data = self._request("POST", "/process", {"text": text, "rules_only": rules_only})
+            data = self._request("POST", path, {"text": text, "rules_only": rules_only})
         except ServerError as exc:
             if exc.kind != "no_model" or rules_only:
                 raise
             self.model_available = False
             rules_only = True
-            data = self._request("POST", "/process", {"text": text, "rules_only": True})
+            data = self._request("POST", path, {"text": text, "rules_only": True})
         else:
             if not rules_only:
                 self.model_available = True
+        return data, rules_only
+
+    def preview(self, text: str):
+        """Exact ranges without retaining any work item on the team server."""
+        data, rules_only = self._detect_request("/process/preview", text)
+        spans = data.get("spans") if isinstance(data, dict) else None
+        if not isinstance(spans, list) or not all(
+                isinstance(s, dict) and type(s.get("start")) is int and type(s.get("end")) is int
+                and 0 <= s["start"] < s["end"] <= len(text) and isinstance(s.get("type"), str)
+                for s in spans):
+            raise ServerError("서버의 탐지 위치를 읽지 못했습니다.", "bad_response")
+        return spans, rules_only
+
+    def process(self, text: str) -> ProcessResult:
+        data, rules_only = self._detect_request("/process", text)
         try:
             return ProcessResult(
                 work_id=str(data["work_id"]), masked_text=str(data["masked_text"]),

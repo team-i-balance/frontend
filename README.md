@@ -17,6 +17,19 @@ pythonw kp_guard.pyw --background    # 창 없이 트레이에 상주 (자동 �
 첫 실행 때 "Windows 로그인 시 자동 실행" 여부를 묻는다. 설정 창에서 언제든 켜고 끌 수 있다
 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\KPGuard`, 관리자 권한 불필요).
 
+## ChatGPT·Claude 웹과 CLI에서 입력 중 검사
+
+브라우저 확장과 터미널 입력창은 타이핑이 시작되면 현재 프롬프트를 검사합니다. 기본 서버 모드에서 팀 서버의 `POST /process/preview`를 사용합니다. 입력 중 탐지 결과로 작업·로그를 만들지 않고, 사용자가 가명화·원문 사용 등을 선택하면 기존 처리 API를 사용합니다. [확장 연결 및 칩 사용법](browser-extension/README.md)
+
+Claude Code 또는 Codex CLI를 설치하고 해당 CLI에서 로그인한 뒤, PC 앱의 **브라우저·CLI 연결 코드 복사**를 한 번 누릅니다. 이 레포 루트에서 다음 중 하나를 실행합니다. 다른 프로젝트에서 작업할 때는 해당 프로젝트 폴더로 이동한 뒤 `python /절대경로/program/kp_guard_cli.py claude` 또는 `codex`로 실행합니다.
+
+```sh
+python -m agent.cli claude
+python -m agent.cli codex
+```
+
+보호된 터미널 입력창에서 표시된 단어를 클릭하거나 커서를 놓고 **F2**를 누르면 칩이 열립니다. **F3**으로 가명화를 적용하고 **Enter**로 실제 CLI에 전송합니다. **F4**는 최근 답변 복원, **F5**는 서버 기능 목록, **Ctrl+J**는 줄바꿈입니다. 같은 실행의 후속 질문은 공급자가 반환한 세션 ID로 이어집니다. 이 진입점은 Claude Code의 print 모드와 Codex의 exec 모드를 사용합니다. 기존 네이티브 TUI의 슬래시 명령과 승인 대화상자는 해당 CLI 자체 실행에서 사용합니다.
+
 ## 처리 위치: 서버 (기본) / 이 PC
 
 설정 창의 "처리 위치"에서 고른다. 기본은 서버이고 주소는 `https://13.193.207.69`(팀 backend, Caddy HTTPS)이다.

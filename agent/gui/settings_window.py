@@ -79,6 +79,10 @@ class SettingsWindow(tk.Toplevel):
             theme.label(box.body, detail, "caption12", theme.TEXT_SECONDARY, wraplength=px(300)).pack(fill="x")
         self.btn_pause = theme.Button(box.body, "30분 일시정지", lambda: app.post("pause"), size="sm")
         self.btn_pause.pack(anchor="w")
+        connection = tk.Frame(box.body, bg=theme.BG_SURFACE)
+        connection.pack(anchor="w", pady=(px(8), 0))
+        theme.Button(connection, "브라우저·CLI 연결 코드 복사", app.pair_browser, size="sm").pack(side="left")
+        theme.Button(connection, "연결 해제", app.disconnect_browser, kind="ghost", size="sm").pack(side="left")
 
         # ---------------------------------------------------------------- 처리 위치
         pbox = theme.Card(col1, title="처리 위치", fit=True)
