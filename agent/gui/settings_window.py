@@ -12,9 +12,21 @@ from tkinter import filedialog
 
 from .. import config
 from ..events.log import QUEUE_LABELS
+from ..server.client import AUTH_KINDS, CERT_KINDS
 from ..system import autostart
 from . import theme
 from .samples import SAMPLES
+from .server_auth import ServerAuthDialog, short_fingerprint
+
+# 연결·인증 오류는 이 창에서 짧게 (자세한 안내는 '인증·인증서' 대화상자에서)
+SHORT_STATUS = {
+    "untrusted_cert": "인증서 확인 필요 · '인증·인증서'에서 지문을 확인하세요",
+    "pin_mismatch": "인증서가 신뢰한 것과 달라요 · 가로채기일 수 있어 아무것도 보내지 않았어요",
+    "unauthorized": "토큰이 맞지 않아요 · '인증·인증서'에서 확인하세요",
+    "forbidden": "토큰 권한이 없어요 · 개발용 토큰을 막은 서버면 팀 토큰이 필요해요",
+    "insecure": "HTTP 주소에는 토큰을 보내지 않아요 · https://로 바꾸세요",
+    "tls": "암호화 연결(TLS) 실패 · 주소의 https와 포트를 확인하세요",
+}
 
 
 class SettingsWindow(tk.Toplevel):
@@ -76,7 +88,11 @@ class SettingsWindow(tk.Toplevel):
                         self._set_processing).pack(fill="x")
         self.v_url = tk.StringVar(value=app.settings.get("server_url", ""))
         theme.Input(pbox.body, textvariable=self.v_url).pack(fill="x", pady=(px(12), 0))
-        theme.Button(pbox.body, "저장·연결 확인", self._save_server, size="sm").pack(anchor="w", pady=(px(8), 0))
+        brow = tk.Frame(pbox.body, bg=theme.BG_SURFACE)
+        brow.pack(fill="x", pady=(px(8), 0))
+        theme.Button(brow, "저장·연결 확인", self._save_server, size="sm").pack(side="left")
+        self.btn_auth = theme.Button(brow, "인증·인증서…", self._open_auth, kind="ghost", size="sm")
+        self.btn_auth.pack(side="left", padx=(px(8), 0))
         self.server_info = theme.label(pbox.body, "", wraplength=px(330))
         self.server_info.pack(fill="x", pady=(px(8), 0))
 
@@ -142,18 +158,25 @@ class SettingsWindow(tk.Toplevel):
         self.v_monitor.set(self.app.settings["monitoring"])
         self.v_proc.set(self.app.settings.get("processing", "server"))
         status = self.app.server_status
-        lines = [f"서버: {status if status in ('연결됨', '확인 전', '확인 중…') else '연결 안 됨 · ' + status}"]
+        error = self.app.server_error
+        short = SHORT_STATUS.get(error.kind) if error is not None else None
+        lines = [f"서버: {status if status in ('연결됨', '확인 전', '확인 중…') else '연결 안 됨 · ' + (short or status)}"]
         if os.environ.get("KPGUARD_SERVER_URL"):
             lines.append(f"KPGUARD_SERVER_URL 주소 사용 중: {os.environ['KPGUARD_SERVER_URL']}")
         rules_only = False
         if server is not None and status == "연결됨":
             line, rules_only = self._coverage(server)
             lines.append(line)
+        if server is not None:
+            lines += self._security(server)
         if server is not None and server.insecure:
             lines.append("암호화되지 않은 연결(HTTP) · 실제 개인정보는 HTTPS로 바꾼 뒤에")
         bad = (server is None or server.insecure or rules_only
                or self.app.server_status not in ("연결됨", "확인 전", "확인 중…"))
         self.server_info.configure(text="\n".join(lines), fg=theme.TEXT_DANGER if bad else theme.TEXT_SECONDARY)
+        # 인증서·토큰 문제를 고칠 곳이 지금 할 일 하나다 (앰버)
+        self.btn_auth.set_kind("primary" if error is not None and error.kind in CERT_KINDS | AUTH_KINDS
+                               else "ghost")
         models = self.app.models
         info = models.describe()
         if models.state == "off" and self.app.settings.get("model_enabled", True):
@@ -175,6 +198,19 @@ class SettingsWindow(tk.Toplevel):
             lines.append(f"\n변환 수용률  {st['acceptance'] * 100:.0f}%  (전송 {st['sent']}건 중 변환문 그대로 전송)")
         lines.append(f"매핑  {len(self.app.session.entries)}개 (메모리)")
         self.stats.configure(text="\n".join(lines))
+
+    @staticmethod
+    def _security(server) -> list[str]:
+        """인증 방식과 인증서 확인 방식 한 줄씩."""
+        token = {"team": "팀 토큰", "dev": "개발용 토큰 (서버가 발급)", "none": "토큰 없음"}[server.auth_mode]
+        if server.auth_mode == "team" and os.environ.get("KPGUARD_API_TOKEN"):
+            token += " · KPGUARD_API_TOKEN"
+        lines = [f"인증: {token}"]
+        if server.cert_mode == "pinned":
+            lines.append(f"인증서: 지문 고정 {short_fingerprint(server.pin)}")
+        elif server.cert_mode == "system":
+            lines.append("인증서: 시스템 인증서 저장소로 확인")
+        return lines
 
     @staticmethod
     def _coverage(server) -> tuple[str, bool]:
@@ -218,6 +254,13 @@ class SettingsWindow(tk.Toplevel):
         if self.app.server is None:
             self.app.toast("서버 주소는 https://주소[:포트] 형식으로 적어 주세요")
         self.refresh()
+
+    def _open_auth(self) -> None:
+        dialog = getattr(self, "auth_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            return
+        self.auth_dialog = ServerAuthDialog(self.app, self)
 
     def _pick_model(self) -> None:
         folder = filedialog.askdirectory(parent=self, title="AEGIS 모델 폴더 (model.onnx · tokenizer.json · config.json)")

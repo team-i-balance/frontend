@@ -19,7 +19,8 @@ from ..detect.scoring import AUTO_APPLY
 from ..events.log import EventLog
 from ..sanitize.engine import Session
 from ..sanitize.restore import restore
-from ..server.client import WORK_TTL_SECONDS, ServerClient, ServerError
+from ..server.client import (CERT_KINDS, WORK_TTL_SECONDS, ServerClient, ServerError, normalize_fingerprint,
+                             server_key, valid_token)
 from ..system import autostart, platform_api
 from . import theme
 if sys.platform == "darwin":
@@ -99,6 +100,7 @@ class App:
         self.server_work: ServerWork | None = None
         self.file_tokens: dict[str, float] = {}   # 서버 파일 보호본의 자리표시 → 받은 시각
         self.server_status = "확인 전"
+        self.server_error: ServerError | None = None  # 마지막 연결 확인 오류 (인증서·토큰 안내에 씀)
         self._setup_server()
         if self.server_mode():
             self.check_server()
@@ -138,12 +140,24 @@ class App:
     # ================================================================== 서버 처리
     def _setup_server(self) -> None:
         url = config.server_url(self.settings)
+        self.server, self.server_work, self.server_error = None, None, None
+        problem = ""
         try:
-            self.server = ServerClient(url, float(self.settings["server_timeout"])) if url else None
-        except ValueError:
-            self.server = None
-        self.server_work = None
-        self.server_status = "확인 전" if self.server else "서버 주소가 올바르지 않아요"
+            if url:
+                self.server = ServerClient(url, float(self.settings["server_timeout"]),
+                                           token=config.api_token(self.settings) or None,
+                                           dev_token=config.auth_mode(self.settings) == "dev",
+                                           pin=config.server_pin(self.settings, url) or None)
+        except ValueError as exc:
+            problem = str(exc)
+        if self.server is not None:
+            self.server_status = "확인 전"
+        elif problem.startswith("token"):
+            self.server_status = "팀 토큰 형식이 올바르지 않아요"
+        elif problem.startswith("pin"):
+            self.server_status = "고정한 인증서 지문 형식이 올바르지 않아요"
+        else:
+            self.server_status = "서버 주소가 올바르지 않아요"
 
     def server_mode(self) -> bool:
         return self.settings.get("processing") == "server"
@@ -153,26 +167,82 @@ class App:
         self.settings["processing"] = processing
         if url is not None:
             self.settings["server_url"] = url.strip()
+        self._reconnect()
+
+    def _reconnect(self) -> None:
         self.save_settings()
         self._setup_server()
         self._state_changed()
-        if processing == "server":
+        if self.server_mode():
             self.check_server()
 
-    def check_server(self) -> None:
-        """연결 확인 (작업 스레드). 원문은 보내지 않는다."""
+    def set_auth(self, mode: str, token: str | None = None) -> str | None:
+        """인증 방식(dev / team)과 팀 토큰을 바꾼다. 토큰 형식이 틀리면 저장하지 않고 이유를 돌려준다."""
+        if mode == "team" and token is not None:
+            token = token.strip()
+            if token and not valid_token(token):
+                return "토큰에는 영문·숫자와 - . _ ~ + / = 만 쓸 수 있어요."
+            self.settings["api_token"] = token
+        self.settings["auth_mode"] = "team" if mode == "team" else "dev"
+        self._reconnect()
+        return None
+
+    def trust_certificate(self, fingerprint: str) -> bool:
+        """지금 서버 주소(호스트:포트)에 인증서 지문을 고정한다. 다음 연결부터 이 인증서만 믿는다."""
+        value = normalize_fingerprint(fingerprint)
+        url = config.server_url(self.settings)
+        if value is None or not url:
+            return False
+        self.settings["server_pins"] = {**self.settings.get("server_pins", {}), server_key(url): value}
+        self._reconnect()
+        return True
+
+    def forget_certificate(self) -> None:
+        """고정한 지문을 지운다. 다음 연결부터 시스템 인증서 저장소로 확인한다."""
+        url = config.server_url(self.settings)
+        pins = dict(self.settings.get("server_pins", {}))
+        pins.pop(server_key(url), None)
+        self.settings["server_pins"] = pins
+        self._reconnect()
+
+    def probe_certificate(self, done) -> None:
+        """서버가 내보이는 인증서 지문을 읽는다 (작업 스레드, 토큰·글은 보내지 않음).
+        done(지문 또는 None, 오류 또는 None)은 메인 스레드에서 부른다."""
         server = self.server
         if server is None:
-            self.post("server_health", "서버 주소가 올바르지 않아요")
+            done(None, ServerError("서버 주소가 올바르지 않아요.", "unreachable"))
+            return
+
+        def work():
+            try:
+                fingerprint, error = server.probe_certificate(), None
+            except ServerError as exc:
+                fingerprint, error = None, exc
+            except Exception:  # 예외 메시지는 보여 주지 않는다
+                fingerprint, error = None, ServerError("서버 인증서를 읽지 못했어요.", "tls")
+            self.post("call", done, fingerprint, error)
+
+        threading.Thread(target=work, daemon=True, name="server-cert").start()
+
+    def check_server(self) -> None:
+        """연결 확인 (작업 스레드). 인증서와 토큰까지 확인하고, 원문은 보내지 않는다."""
+        server = self.server
+        if server is None:
+            self.post("server_health", self.server_status, None)
             return
         self.server_status = "확인 중…"
 
         def work():
+            error = None
             try:  # 탐지 범위(모델+규칙 / 규칙만, SLM 준비)도 함께 받아 둔다 → server.last_health
-                status = "연결됨" if server.health().ok else "응답이 이상해요"
+                if server.health().ok:
+                    server.check_auth()  # 토큰 확인. 개발용 토큰은 여기서 받는다
+                    status = "연결됨"
+                else:
+                    status = "응답이 이상해요"
             except ServerError as exc:
-                status = exc.message
-            self.post("server_health", status)
+                status, error = exc.message, exc
+            self.post("server_health", status, error, server)
 
         threading.Thread(target=work, daemon=True, name="server-health").start()
 
@@ -275,8 +345,15 @@ class App:
         elif cmd == "model_state":
             self._model_state_changed()
         elif cmd == "server_health":
-            self.server_status = args[0]
+            status, error, *checked = args
+            if checked and checked[0] is not self.server:
+                return  # 그 사이 설정을 바꿔 다른 서버로 다시 확인 중
+            self.server_status, self.server_error = status, error
+            if error is not None and error.kind in CERT_KINDS and not self.settings_win:
+                self.toast("서버 인증서를 확인해야 해요. 설정 창(Ctrl+Alt+O)의 '인증·인증서'에서 확인하세요.")
             self._state_changed()
+        elif cmd == "call":
+            args[0](*args[1:])
         elif cmd == "server_decided":
             work, error = args
             if work is not None:

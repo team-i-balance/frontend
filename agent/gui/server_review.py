@@ -20,7 +20,7 @@ from ..detect.span import TYPE_LABELS
 from ..events.log import REASON_PRIORITY
 from ..sanitize.restore import restore as local_restore
 from ..server.align import LABEL_TYPE, PLACEHOLDER, Repl, align, compose, premask, to_orig
-from ..server.client import ServerError
+from ..server.client import AUTH_KINDS, CERT_KINDS, NOT_PROCESSED, ServerError
 from ..system import platform_api
 from . import theme
 from .restore_window import build_restore_layout
@@ -76,6 +76,8 @@ class ServerReviewWindow(tk.Toplevel):
         build_layout(self, "AI에 보낼 변환문 (서버가 가린 글)", SERVER_COLUMNS)
         self.btn_retry = theme.Button(self.b_actions, "다시 시도", self.check, size="sm")
         self.btn_local = theme.Button(self.b_actions, "이 PC에서 검사", self.on_local, size="sm")
+        # 인증서·토큰 문제는 설정 창의 '인증·인증서'에서 고친다
+        self.btn_settings = theme.Button(self.b_actions, "설정 열기", lambda: self.app.post("settings"), size="sm")
         self.btn_internal = theme.Button(self.b_actions, "사내 AI에서 처리", self.on_internal, size="sm")
         self.orig.bind("<<Modified>>", self._on_modified)
         self.orig.bind("<Button-3>", self._on_right_click)
@@ -348,7 +350,7 @@ class ServerReviewWindow(tk.Toplevel):
         g = self.grade()
         res = self.result
         lines = []
-        for b in (self.btn_retry, self.btn_local, self.btn_internal):
+        for b in (self.btn_retry, self.btn_local, self.btn_internal, self.btn_settings):
             b.pack_forget()
         if g == "C":
             tone, title = "danger", "기밀 · 외부 AI 전송이 차단됐어요"
@@ -365,6 +367,8 @@ class ServerReviewWindow(tk.Toplevel):
             tone, title = "danger", "서버에서 검사하지 못했어요"
             lines += [self.error.message, "다시 시도하거나 이 PC에서 검사하세요."]
             self.btn_local.pack(side="right")
+            if self.error.kind in CERT_KINDS | AUTH_KINDS:
+                self.btn_settings.pack(side="right", padx=(0, theme.px(8)))
             self.btn_retry.pack(side="right", padx=(0, theme.px(8)))
             self.btn_send.configure(text="변환문 복사", state="disabled")
         elif res is None:
@@ -705,8 +709,8 @@ class ServerRestoreWindow(tk.Toplevel):
             return
         self.btn_run.configure(state="normal", text="서버에서 복원")
         if err is not None:
-            if err.kind in ("unreachable", "failed") and work.alive() and self.app.server_work is None:
-                self.app.server_work = work  # 서버에 닿지 못했으면 작업이 남아 있으니 다시 시도할 수 있다
+            if (err.kind in NOT_PROCESSED or err.kind == "failed") and work.alive() and self.app.server_work is None:
+                self.app.server_work = work  # 서버가 복원하지 않았으면 작업이 남아 있으니 다시 시도할 수 있다
             self._show(reply, reply, err.message, failed=True)
         else:
             note = f"그대로 둔 비밀값 {len(res.blocked)}개" if res.blocked else ""
