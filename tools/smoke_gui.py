@@ -28,7 +28,13 @@ from tkinter import messagebox  # noqa: E402
 
 messagebox.askyesno = lambda *a, **k: False  # 자동 시작 질문은 건너뛴다
 
+from agent import config  # noqa: E402
 from agent.files import processor  # noqa: E402
+
+# 설정·로그를 임시 폴더에만 쓴다. macOS의 data_dir()은 LOCALAPPDATA 대신 ~/Library/Application Support를 쓴다
+_SMOKE_DIR = Path(os.environ["LOCALAPPDATA"]) / config.APP_NAME
+_SMOKE_DIR.mkdir(parents=True, exist_ok=True)
+config.data_dir = lambda: _SMOKE_DIR
 from agent.gui.app import App  # noqa: E402
 from agent.gui.samples import SAMPLES  # noqa: E402
 from tests import toy_model  # noqa: E402

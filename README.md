@@ -50,7 +50,7 @@ pythonw kp_guard.pyw --background    # 창 없이 트레이에 상주 (자동 �
 | 토큰 | 쓰는 법 |
 |---|---|
 | 개발용 토큰 (기본) | 서버 `POST /auth/dev-token`이 바로 내주는 토큰을 받아 쓴다. 서버 메모리에만 있어 서버를 다시 시작하면(배포마다) 무효가 되므로, 401이면 한 번 새로 받아 다시 보낸다. 운영 서버가 막으면(`DISABLE_DEV_TOKEN=1`, 403) 팀 토큰을 넣으라고 안내한다 |
-| 팀 토큰 | 관리자에게 받은 토큰(서버 `API_TOKENS`). 설정 창에 넣으면 `%LOCALAPPDATA%\KPGuard\settings.json`에 저장한다 (DPAPI 보호는 태스크 24) |
+| 팀 토큰 | 관리자에게 받은 토큰(서버 `API_TOKENS`). 설정 창에 넣으면 사용자 폴더의 `KPGuard/settings.json`에 저장한다 (Windows `%LOCALAPPDATA%`, macOS `~/Library/Application Support`. DPAPI 보호는 태스크 24) |
 
 - 토큰은 HTTPS나 이 PC 안의 서버(127.0.0.1)로만 보낸다. 다른 PC의 HTTP 주소에는 보내지 않고 멈춘다
 - 연결 확인("저장·연결 확인")은 `/health`와 api 권한으로 읽기만 하는 `GET /policy/current`로 토큰까지 확인한다. 글은 보내지 않는다

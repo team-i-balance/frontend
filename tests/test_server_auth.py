@@ -183,16 +183,17 @@ class CertificateTests(unittest.TestCase):
 class SettingsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp.name})
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.addCleanup(self.tmp.cleanup)
+        # macOS는 LOCALAPPDATA 대신 ~/Library/Application Support를 쓰므로 폴더 자체를 바꾼다 (실제 설정을 건드리지 않게)
+        for patcher in (mock.patch.object(config, "data_dir", lambda: Path(self.tmp.name)),
+                        mock.patch.dict(os.environ)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         for name in ("KPGUARD_SERVER_URL", "KPGUARD_API_TOKEN", "KPGUARD_SERVER_PIN"):
             os.environ.pop(name, None)
 
     def test_old_plain_http_default_moves_to_https(self):
-        path = Path(self.tmp.name) / config.APP_NAME / "settings.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path = Path(self.tmp.name) / "settings.json"
         path.write_text(json.dumps({"server_url": config.OLD_SERVER_URL}), encoding="utf-8")
         self.assertEqual(config.load_settings()["server_url"], "https://13.193.207.69")
         path.write_text(json.dumps({"server_url": "http://127.0.0.1:8000"}), encoding="utf-8")
