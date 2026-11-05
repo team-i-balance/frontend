@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 APP_NAME = "KPGuard"
@@ -24,8 +25,11 @@ DEFAULTS = {
 
 
 def data_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home())
-    path = Path(base) / APP_NAME
+    if sys.platform == "darwin":
+        path = Path.home() / "Library" / "Application Support" / APP_NAME
+    else:
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        path = Path(base) / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 
