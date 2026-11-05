@@ -21,7 +21,7 @@ class SettingsWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
         self.app = app
-        theme.window(self, "KP Guard — 설정·상태", 1200, 740, 1000, 600)
+        theme.window(self, "KP Guard — 설정·상태", 1200, 780, 1000, 600)
         self.protocol("WM_DELETE_WINDOW", self._close)
         gap, px = theme.px(16), theme.px
 
@@ -135,14 +135,15 @@ class SettingsWindow(tk.Toplevel):
         self.sub.configure(text=f"{where} {tray}")
         self.v_monitor.set(self.app.settings["monitoring"])
         self.v_proc.set(self.app.settings.get("processing", "server"))
-        lines = [f"서버 상태: {self.app.server_status}"]
+        status = self.app.server_status
+        lines = [f"서버: {status if status in ('연결됨', '확인 전', '확인 중…') else '연결 안 됨 · ' + status}"]
         if os.environ.get("KPGUARD_SERVER_URL"):
-            lines.append(f"KPGUARD_SERVER_URL 환경 변수의 주소를 쓰고 있어요: {os.environ['KPGUARD_SERVER_URL']}")
-        if server is not None:
+            lines.append(f"KPGUARD_SERVER_URL 주소 사용 중: {os.environ['KPGUARD_SERVER_URL']}")
+        if server is not None and status == "연결됨":
             lines.append({None: "서버 모델: 첫 검사 때 확인해요", True: "서버 모델: 사용 중 (모델+규칙)",
-                          False: "서버 모델: 없음 → 규칙만으로 검사해요 (이름·주소 미검사)"}[server.model_available])
-            if server.insecure:
-                lines.append("암호화되지 않은 연결(HTTP)이에요. 실제 개인정보로 쓰기 전에 서버를 HTTPS로 바꿔야 해요.")
+                          False: "서버 모델: 없음 · 이름·주소 미검사"}[server.model_available])
+        if server is not None and server.insecure:
+            lines.append("암호화되지 않은 연결(HTTP) · 실제 개인정보는 HTTPS로 바꾼 뒤에")
         bad = server is None or server.insecure or self.app.server_status not in ("연결됨", "확인 전", "확인 중…")
         self.server_info.configure(text="\n".join(lines), fg=theme.TEXT_DANGER if bad else theme.TEXT_SECONDARY)
         models = self.app.models
