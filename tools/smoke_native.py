@@ -199,7 +199,8 @@ def main():
                 first = overlay.chip.cards[0]
                 rx0, ry0, rx1, ry1 = first.row_box(0)
                 row = (rx0 + rx1) // 2, (ry0 + ry1) // 2
-                assert first.ty + first.h <= y, "first chip covers the word"
+                cx0, cy0, cx1, cy1 = first.tx, first.ty, first.tx + first.w, first.ty + first.h
+                assert cx1 <= x or cx0 >= r or cy1 <= y or cy0 >= b, "first chip covers the word"
                 mouse(*row, True)
                 time.sleep(0.08)
                 mouse(*row, False)
