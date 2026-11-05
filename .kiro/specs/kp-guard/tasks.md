@@ -63,7 +63,12 @@
   실제 팀 서버(`13.193.207.69:8501`, 평문 HTTP)는 개발 환경에서 닿지 않아 확인하지 못함
 - **backend에 필요한 일** (테스트하면서 확인, 이슈 등록: backend#10 HTTPS·인증, #11 모델 설정·의존성, #12 조사, #13 원격 수집,
   #14 보호본 다운로드 — #11~#14는 닫힘·확인함, #29 파일 답변 복원·자리표시 번호 겹침, #30 파일 결과의 탐지 유형·개수, #32 파일 검사 기록)
-  - HTTPS + 토큰 인증: 지금은 원문 프롬프트가 HTTP 평문으로 가고 인증이 없다. `/logs/events` GET으로 전체 로그도 보인다
+  - ~~HTTPS + 토큰 인증~~ → 해결 (backend#10, main `c7e8a48`에서 확인): Caddy가 443에서 HTTPS(IP 주소에 자체 서명 인증서),
+    `/health`·`/auth/dev-token` 말고는 Bearer 토큰(팀 `API_TOKENS`, 개발용 `POST /auth/dev-token`, 서버 메모리라 재시작하면 무효).
+    앱 반영 (`server/client.py`, 설정 창 '인증·인증서' `gui/server_auth.py`): 기본 주소 `https://13.193.207.69`,
+    토큰(팀·개발용, 개발용은 401이면 한 번 다시 받음, HTTP 원격 주소로는 안 보냄), 인증서 SHA-256 지문 고정(요청 전에 확인,
+    다르면 아무것도 안 보냄), 오류 종류(`tls`·`untrusted_cert`·`pin_mismatch`·`insecure`·`unauthorized`·`forbidden`).
+    backend main을 자체 서명 HTTPS로 띄워 확인. 팀 서버의 실제 지문은 개발 환경에서 닿지 않아 받지 못했다
   - 큐 분류 규칙 3(`cancel` + high → `real_violation`)이 흐름도와 다르다. 점검 창을 닫기만 해도 실제 위반으로 쌓인다.
     흐름도: 취소 → 사전 경고, "무시(사유 없이 원문 전송) + 확실한 탐지" → 실제 위반
   - `revert_original`은 매핑을 바로 지워서 일부만 되돌린 뒤 답변 복원이 안 된다 → 앱은 `send_transformed` + 사유로 기록 중
@@ -82,6 +87,9 @@
     (backend#29 복원·번호, #30 유형·개수, #32 기록)
   - 작업은 `/process` 시점부터 10분, 복원은 한 번만 된다 (긴 대화의 여러 답변을 복원하려면 연장·여러 번 복원이 필요)
 - 남은 일
+  - 팀 서버 인증서 지문을 서버 관리자에게 받아 배포 (`openssl x509 -in /etc/caddy/selfsigned/cert.pem -noout -fingerprint -sha256`
+    → 사용자에게 알리거나 MDM `KPGUARD_SERVER_PIN`). 운영에서 개발용 토큰을 막으면(`DISABLE_DEV_TOKEN=1`) 팀 토큰 배포 방법도 정한다
+  - 팀 토큰을 설정 파일 평문 대신 DPAPI로 보호 (Phase 6 24)
   - 모델 파일(AEGIS `model.onnx`·`tokenizer.json`·`config.json`, SLM `models/v1/final`)을 서버에 올리기 → 실제 모델로 정확도·속도 측정
   - SLM: 서버에서 실행 (README 목표도 "사내 서버"). 정책 규칙은 서버가 관리
   - slm 레포는 Windows에서 클론이 안 된다: `data/train_raw/con.*` 파일명의 `CON`이 Windows 예약 이름 → 이름 변경 필요 (slm 레포 담당)
@@ -111,6 +119,7 @@ backend는 이 환경에서 띄워 확인했고, 실제 팀 서버는 개발 환
 | #33 | 보안팀 사건 검토 API | 콘솔 쪽. 앱 할 일 없음 (사유 제출은 B1) | — |
 | #35 | 정책 버전별 적용 현황·배포 이력 | PC가 적용 결과를 보내야 집계됨 | B2 |
 | #37 | 원문 전송 뒤 직원 사유 제출 | 제출 화면 없음 | B1 |
+| #10 (커밋 `23a455b`~`c7e8a48`) | Bearer 토큰(api·security), 개발용 토큰 발급, Caddy HTTPS(자체 서명) | 반영: 토큰(팀·개발용)·인증서 지문 고정·오류 종류, 설정 창 '인증·인증서' | B10 |
 
 열린 PR #31(정형 규칙 추가)·#34(시험 이벤트 표시)·#36(이벤트에 기기·직원·대상 AI·항목별 결정)은 머지되면 B9.
 우선순위: B1·B6·B4 → B2 → B5·B7 → B3·B8 → B9.
@@ -175,6 +184,8 @@ backend는 이 환경에서 띄워 확인했고, 실제 팀 서버는 개발 환
   - 지금 앱(`events/log.py`): `pre_warning`·`tuning`·`candidate`·`violation`·`missed`·`regression`,
     실제 위반 = `sent_original` + 최고 신뢰도 0.85 이상 (등급·검사 범위를 보지 않음)
   - 할 일: 통계·JSONL 내보내기의 큐 이름과 규칙 3을 서버와 같게. 이 PC에만 있는 `missed`·`regression`은 남기고 문서에 밝힌다
+- [x] B10 서버 인증·HTTPS (backend#10) — 토큰(팀·개발용), 인증서 지문 고정, 오류 종류, 설정 창 '인증·인증서', 가짜 서버 HTTPS·토큰
+  시험(`tests/test_server_auth.py`, `tests/certs`)과 GUI 점검. 남은 것: 팀 서버 실제 지문 배포, 토큰 DPAPI(24)
 - [ ] B9 열린 backend PR이 머지되면
   - #36: `/logs/events`(`/decide`에도 들어오면 그쪽도)에 `device_id`(B2)·`target_ai`·항목별 `items[]`(유형·결정·사유·`value_hash`·가린 미리보기)를
     보낸다. 점검 창의 항목별 되돌리기 사유가 여기에 들어간다. 대상 AI는 붙여넣을 창을 알아야 해서 방법을 정해야 한다

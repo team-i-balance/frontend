@@ -4,14 +4,32 @@
 탐지는 단순하다: 전화번호(규칙), 정해 둔 이름(모델 모드에서만), api_key= 값(규칙).
 실제 backend처럼 모델이 없으면 rules_only=false 요청에 400을, 파일 요청에 503 MODEL_UNAVAILABLE을 주고,
 작업은 한 번 복원하면 지우고, 보호본은 한 번만 내준다. busy=n이면 파일 요청 n번에 429를 준다.
+
+auth=True면 backend#10처럼 /health·/auth/dev-token 말고는 Bearer 토큰을 확인한다 (없거나 틀리면 401).
+개발용 토큰은 메모리에만 두고 restart()에서 잊는다. dev_tokens=False면 발급을 403으로 막는다 (운영 서버).
+auth=False 서버에는 /auth/dev-token이 없다 (인증 전 backend). tls="server"면 tests/certs의 인증서로 HTTPS를 연다
+("server"는 시험 CA가 서명, "other"는 자체 서명). use_cert()로 인증서를 바꿔 끼울 수 있다.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import secrets
+import ssl
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+CERTS = Path(__file__).resolve().parent / "certs"   # 시험 전용 인증서·키 (127.0.0.1)
+PUBLIC = ("/health", "/auth/dev-token")
+
+
+def fingerprint(name: str) -> str:
+    """tests/certs/<name>.pem 인증서의 SHA-256 지문 (소문자 16진수)."""
+    der = ssl.PEM_cert_to_DER_cert((CERTS / f"{name}.pem").read_text(encoding="ascii"))
+    return hashlib.sha256(der).hexdigest()
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -23,10 +41,18 @@ SECRET = {"API_KEY"}
 
 
 class FakeBackend:
-    def __init__(self, model: bool = True, busy: int = 0, legacy_health: bool = False):
+    def __init__(self, model: bool = True, busy: int = 0, legacy_health: bool = False, *, auth: bool = False,
+                 dev_tokens: bool = True, team_tokens=(), tls: str | None = None):
         self.model = model
         self.busy = busy
         self.legacy_health = legacy_health  # backend#11 전 서버: /health가 탐지 범위를 알려 주지 않음
+        self.auth = auth
+        self.dev_tokens = dev_tokens
+        self.team_tokens = set(team_tokens)
+        self.issued: set[str] = set()       # /auth/dev-token으로 내준 토큰 (서버 메모리)
+        self.policy = True                  # False면 GET /policy/current가 없는 서버
+        self.redirect_to = ""               # GET /redirect가 보낼 주소
+        self.auth_seen: list[tuple[str, str | None]] = []  # (경로, Authorization 헤더)
         self.works: dict[str, dict] = {}
         self.decisions: list[dict] = []
         self.requests: list[str] = []  # 경로만 남긴다
@@ -38,6 +64,21 @@ class FakeBackend:
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
+
+            def _authorized(self) -> bool:
+                """backend app/auth.py require_api처럼 Bearer 토큰을 확인한다. 막았으면 401을 보내고 False."""
+                header = self.headers.get("Authorization")
+                backend.auth_seen.append((self.path, header))
+                if not backend.auth or self.path in PUBLIC:
+                    return True
+                scheme, _, token = (header or "").partition(" ")
+                if scheme.lower() != "bearer" or not token:
+                    self._send(401, {"detail": "missing bearer token"}, [("WWW-Authenticate", "Bearer")])
+                    return False
+                if token not in backend.team_tokens | backend.issued:
+                    self._send(401, {"detail": "invalid token"}, [("WWW-Authenticate", "Bearer")])
+                    return False
+                return True
 
             def _send(self, status, body, headers=()):
                 data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -51,8 +92,17 @@ class FakeBackend:
 
             def do_GET(self):
                 backend.requests.append(self.path)
+                if not self._authorized():
+                    return
                 m = re.fullmatch(r"/files/([^/]+)/download", self.path)
-                if self.path == "/health":
+                if self.path == "/policy/current" and backend.policy:
+                    self._send(200, {"active": False})
+                elif self.path == "/redirect":  # 다른 주소로 보내는 응답 (토큰이 따라가면 안 된다)
+                    self.send_response(307)
+                    self.send_header("Location", backend.redirect_to)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                elif self.path == "/health":
                     self._send(200, {"status": "ok"} if backend.legacy_health else
                                {"status": "ok", "detection": "model" if backend.model else "rules_only",
                                 "slm": False, "slm_ready": False})
@@ -73,6 +123,19 @@ class FakeBackend:
             def do_POST(self):
                 backend.requests.append(self.path)
                 raw = self.rfile.read(int(self.headers["Content-Length"]))
+                if not self._authorized():
+                    return
+                if self.path == "/auth/dev-token":
+                    if not backend.auth:  # 인증 전 backend에는 이 경로가 없다
+                        self._send(404, {"detail": "Not Found"})
+                    elif not backend.dev_tokens:
+                        self._send(403, {"detail": "dev token issuance is disabled"})
+                    else:
+                        token = secrets.token_urlsafe(32)
+                        backend.issued.add(token)
+                        self._send(200, {"token": token, "scope": "api",
+                                         "usage": "send as 'Authorization: Bearer <token>'"})
+                    return
                 if self.path == "/files/sanitize":
                     status, out = backend.handle_file(self.headers.get("Content-Type", ""), raw)
                     self._send(status, out, [("Cache-Control", "no-store")]
@@ -82,7 +145,16 @@ class FakeBackend:
                 self._send(status, out)
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self.httpd.handle_error = lambda request, address: None  # 시험에서 일부러 끊는 TLS 연결은 조용히
+        self.tls = None
+        if tls:
+            self.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.use_cert(tls)
+            # 핸드셰이크는 요청 처리 스레드에서 (끊긴 연결이 서버 전체를 막지 않게)
+            self.httpd.socket = self.tls.wrap_socket(self.httpd.socket, server_side=True,
+                                                     do_handshake_on_connect=False)
+        scheme = "https" if tls else "http"
+        self.url = f"{scheme}://127.0.0.1:{self.httpd.server_address[1]}"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
     def __enter__(self):
@@ -97,6 +169,14 @@ class FakeBackend:
 
     def stop(self):
         self.__exit__()
+
+    def use_cert(self, name: str) -> None:
+        """다음 연결부터 tests/certs/<name>.pem 인증서를 내보인다 (서버 인증서 교체 흉내)."""
+        self.tls.load_cert_chain(CERTS / f"{name}.pem", CERTS / f"{name}.key")
+
+    def restart(self) -> None:
+        """서버 다시 시작: 메모리에 있던 개발용 토큰을 잊는다 (backend는 배포마다 다시 시작한다)."""
+        self.issued.clear()
 
     # ------------------------------------------------------------------ API
     def handle(self, path: str, body: dict):

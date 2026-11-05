@@ -11,6 +11,8 @@ __pycache__/
 .env
 .env.*
 *.pem
+# 시험 전용 인증서 (127.0.0.1, 공개해도 되는 값; tests/certs/README.md)
+!tests/certs/*.pem
 
 # OS
 .DS_Store

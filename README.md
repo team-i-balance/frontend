@@ -19,8 +19,9 @@ pythonw kp_guard.pyw --background    # 창 없이 트레이에 상주 (자동 �
 
 ## 처리 위치: 서버 (기본) / 이 PC
 
-설정 창의 "처리 위치"에서 고른다. 기본은 서버이고 주소는 `http://13.193.207.69:8501`(팀 backend)이다.
-주소는 설정 창이나 `KPGUARD_SERVER_URL` 환경 변수로 바꾼다.
+설정 창의 "처리 위치"에서 고른다. 기본은 서버이고 주소는 `https://13.193.207.69`(팀 backend, Caddy HTTPS)이다.
+주소는 설정 창이나 `KPGUARD_SERVER_URL` 환경 변수로 바꾼다. 예전 기본 주소(`http://13.193.207.69:8501`)를 그대로 쓰던 설정은
+새 주소로 옮긴다 (서버가 이제 uvicorn을 127.0.0.1에만 연다).
 
 | 하는 일 | 서버 처리 | 이 PC에서만 처리 |
 |---|---|---|
@@ -40,7 +41,38 @@ pythonw kp_guard.pyw --background    # 창 없이 트레이에 상주 (자동 �
   규칙만인 서버에는 처음부터 규칙만 모드로 보내고(글을 두 번 보내지 않음) "이름·주소 미검사"라고 표시하며, 파일은 보내지 않는다.
   탐지 범위를 알려 주지 않는 이전 서버는 400(`LOCAL_PII_MODEL_DIR`)을 받은 뒤 규칙만 모드로 다시 요청한다
 - 서버에 닿지 않으면 점검 창에서 "이 PC에서 검사"로 같은 글을 이 PC 엔진으로 검사할 수 있다
-- **지금 서버는 HTTP(암호화 없음)이고 인증이 없다.** 앱은 점검 창과 설정 창에 경고를 띄운다. 실제 개인정보로 쓰기 전에 HTTPS와 토큰 인증이 필요하다
+
+### 서버 연결 보안: 토큰·인증서 (backend#10)
+
+팀 서버는 HTTPS(Caddy)로만 열려 있고, `/health`·`/auth/dev-token` 말고는 `Authorization: Bearer <토큰>`을 요구한다.
+설정 창 "처리 위치"의 **인증·인증서…**에서 정한다 (`agent/gui/server_auth.py`).
+
+| 토큰 | 쓰는 법 |
+|---|---|
+| 개발용 토큰 (기본) | 서버 `POST /auth/dev-token`이 바로 내주는 토큰을 받아 쓴다. 서버 메모리에만 있어 서버를 다시 시작하면(배포마다) 무효가 되므로, 401이면 한 번 새로 받아 다시 보낸다. 운영 서버가 막으면(`DISABLE_DEV_TOKEN=1`, 403) 팀 토큰을 넣으라고 안내한다 |
+| 팀 토큰 | 관리자에게 받은 토큰(서버 `API_TOKENS`). 설정 창에 넣으면 사용자 폴더의 `KPGuard/settings.json`에 저장한다 (Windows `%LOCALAPPDATA%`, macOS `~/Library/Application Support`. DPAPI 보호는 태스크 24) |
+
+- 토큰은 HTTPS나 이 PC 안의 서버(127.0.0.1)로만 보낸다. 다른 PC의 HTTP 주소에는 보내지 않고 멈춘다
+- 연결 확인("저장·연결 확인")은 `/health`와 api 권한으로 읽기만 하는 `GET /policy/current`로 토큰까지 확인한다. 글은 보내지 않는다
+
+**인증서 지문 고정.** 서버는 도메인 없이 IP 주소에 자체 서명 인증서를 쓴다. 시스템이 믿는 인증서가 아니므로 처음 연결하면
+"인증서 확인 필요"가 뜬다. 인증·인증서 창이 서버가 보낸 인증서의 SHA-256 지문을 보여 주면, **서버 관리자에게 받은 지문과
+같은지 확인한 뒤** 신뢰한다 (붙여넣으면 바로 비교한다). 서버에서 지문 확인:
+
+```bash
+openssl x509 -in /etc/caddy/selfsigned/cert.pem -noout -fingerprint -sha256
+```
+
+- 지문은 서버(호스트:포트)별로 저장한다. 고정한 뒤에는 연결할 때마다 요청을 보내기 전에 서버 인증서가 그 지문과 같은지 보고,
+  다르면 토큰·글을 하나도 보내지 않고 끊는다 ("인증서가 신뢰한 것과 달라요" — 가로채기이거나 서버 인증서를 바꾼 경우)
+- 회사 프록시(`HTTPS_PROXY`)를 써도 서버와 직접 TLS를 맺으므로 지문 확인은 그대로다. TLS를 풀어 보는 프록시면 지문이 달라 막힌다
+- 지문을 고정하지 않은 https 주소는 시스템 인증서 저장소로 확인한다 (공인 인증서로 바꾼 뒤에는 고정을 해제해도 된다)
+- 배포 관리(MDM): `KPGUARD_SERVER_URL`, `KPGUARD_API_TOKEN`(팀 토큰), `KPGUARD_SERVER_PIN`(지문)으로 미리 넣을 수 있다
+
+연결 오류 종류 (`ServerError.kind`, 화면 안내와 파일 검사 사유가 이것을 따른다):
+`unreachable`(닿지 않음) · `tls`(TLS 실패) · `untrusted_cert`(인증서 확인 필요) · `pin_mismatch`(인증서가 다름) ·
+`insecure`(HTTP로 토큰을 보내지 않음) · `unauthorized`(401) · `forbidden`(403) · `no_model` · `expired` · `failed` · `rejected` · `bad_response`.
+인증서·토큰 문제면 점검 창에 "설정 열기"가 나오고, 서버가 처리하지 않은 게 분명한 오류면 답변 복원을 다시 시도할 수 있다.
 
 ## 탐지 단계 (이 PC에서 처리할 때)
 
@@ -132,8 +164,19 @@ python -m unittest discover -s tests -t . -v   # 탐지·모델·파일 검사·
 python tools/smoke_gui.py                      # GUI 흐름 자동 점검 (서버 처리는 가짜 서버로)
 ```
 
-실제 backend로 서버 흐름을 점검하려면 backend를 로컬에서 띄우고 `KPGUARD_SMOKE_SERVER=http://127.0.0.1:8000`을 주고
-`tools/smoke_gui.py`를 실행한다 (합성 데이터만 보낸다).
+- 가짜 서버는 backend#10처럼 토큰을 확인하고(개발용 토큰 발급·다시 시작·팀 토큰), `tests/certs`의 시험 전용 인증서로
+  HTTPS를 연다. `tests/test_server_auth.py`가 토큰·인증서 고정·오류 종류를, GUI 점검이 첫 연결 → 지문 신뢰 → 틀린 팀 토큰 →
+  개발용 토큰 흐름을 확인한다
+- Linux에서는 `xvfb-run -a python tools/smoke_gui.py`로 돌린다 (트레이 없이 실행)
+
+실제 backend로 서버 흐름을 점검하려면 backend를 로컬에서 HTTPS로 띄우고 주소를 준다 (합성 데이터만 보낸다).
+https 주소면 서버가 보낸 인증서를 그대로 신뢰하고 개발용 토큰을 쓴다.
+
+```bash
+# backend 폴더에서. 인증서는 이 레포의 시험 전용 tests/certs (자체 서명, 127.0.0.1)
+uvicorn main:app --host 127.0.0.1 --port 8443 --ssl-certfile <이 레포>/tests/certs/other.pem --ssl-keyfile <이 레포>/tests/certs/other.key
+KPGUARD_SMOKE_SERVER=https://127.0.0.1:8443 python tools/smoke_gui.py
+```
 
 ## 흐름
 
@@ -165,13 +208,13 @@ agent/
 ├─ detect/                 rules(0단계) · lexicon(1단계 경량) · model(2단계 AEGIS ONNX) · scoring(등급·조합 위험) · pipeline
 ├─ sanitize/               engine(전략·치환·문장 정리) · fakes · josa(조사 보정) · restore(답변 복원)
 ├─ files/                  processor(엔진 연결·보호본 재검사) · remote(서버 파일 검사) · xlsx/(backend file_sanitizer 사본)
-├─ server/                 client(backend API·파일 업로드/다운로드) · align(서버 결과 ↔ 원문 위치, 보낼 글 조립, 미리 가리기)
+├─ server/                 client(backend API·파일 업로드/다운로드·토큰·인증서 고정) · align(서버 결과 ↔ 원문 위치, 보낼 글 조립, 미리 가리기)
 ├─ events/log.py           SQLite 로그, classify() 큐 분류, JSONL 내보내기
 ├─ system/                 win32(클립보드·단축키·뮤텍스) · autostart(레지스트리 Run)
 ├─ gui/                    app(상주·감시) · review(점검 창) · server_review(서버 처리 점검·복원 창) · file_window(파일 검사)
-│                          · restore_window · settings_window · tray
+│                          · restore_window · settings_window · server_auth(인증·인증서) · tray
 └─ assets/demo_base.json   시연용 가상 조직 베이스 (코드네임·고객사·내부 도메인)
-tests/                     unittest (toy_model.py: 가짜 AEGIS 모델, fake_backend.py: 가짜 팀 서버)
+tests/                     unittest (toy_model.py: 가짜 AEGIS 모델, fake_backend.py: 가짜 팀 서버, certs/: 시험 전용 인증서)
 tools/smoke_gui.py         GUI 흐름 자동 점검 (임시 폴더 사용)
 build.ps1 · KPGuard.spec   데스크톱 앱(exe) 빌드
 ```
@@ -184,9 +227,11 @@ build.ps1 · KPGuard.spec   데스크톱 앱(exe) 빌드
 - CLI 입력을 직접 가로채지 않고 클립보드로 연결한다. Claude Code 훅·CLI 래퍼는 P0.11
 - 이 PC 처리의 매핑은 앱 메모리에만 있어 앱을 끄면 이전 답변은 복원할 수 없다 (의도된 동작).
   서버 처리의 매핑은 서버에 10분, 한 번 복원할 때까지만 있다
-- 서버 처리는 실제 팀 서버(`13.193.207.69:8501`)로는 검증하지 못했다 (개발 환경에서 평문 HTTP 서버에 닿지 않음).
+- 서버 처리는 실제 팀 서버(`13.193.207.69`)로는 검증하지 못했다 (개발 환경에서 닿지 않음).
   같은 backend 코드(main `2042ae3`)를 로컬에서 띄워 검사·기록·복원·규칙만 모드를 확인했고,
-  파일 검사는 main `4882ff0`(PR #17 보호본 다운로드)으로 업로드·한 번 받기·모델 없음(503)을 확인했다
+  파일 검사는 main `4882ff0`(PR #17 보호본 다운로드)으로 업로드·한 번 받기·모델 없음(503)을 확인했다.
+  토큰·HTTPS는 main `c7e8a48`(backend#10)을 자체 서명 인증서 HTTPS로 띄워 지문 확인·고정, 개발용 토큰 발급·서버 재시작 뒤
+  다시 받기, 팀 토큰, 틀린 토큰(401), 발급 막힘(403), 지문 불일치를 확인했다. 팀 서버의 실제 인증서 지문은 서버 관리자에게 받아야 한다
 - 모든 예시 값은 합성 데이터
 - exe는 코드 서명이 없어 SmartScreen·백신 경고가 뜰 수 있고, 설치 프로그램은 아직 없다 (태스크 27)
 

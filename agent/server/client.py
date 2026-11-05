@@ -1,19 +1,32 @@
-"""팀 서버(backend) API 클라이언트: /health, /process, /process/decide, /process/restore,
+"""팀 서버(backend) API 클라이언트: /health, /auth/dev-token, /process, /process/decide, /process/restore,
 /files/sanitize, /files/{work_id}/download.
 
 탐지·가명화·기록·복원은 서버가 한다 (2026-11-05 결정). 이 PC는 화면과 트리거를 맡는다.
 
-- 표준 라이브러리(urllib)만 쓴다. 회사 프록시 환경 변수(HTTPS_PROXY 등)는 urllib이 그대로 따른다.
-- 오류 메시지에 원문을 넣지 않는다. 서버 응답의 detail도 보여 주지 않는다
+- 표준 라이브러리(urllib, ssl)만 쓴다. 회사 프록시 환경 변수(HTTPS_PROXY 등)는 urllib이 그대로 따른다.
+- 오류 메시지에 원문과 토큰을 넣지 않는다. 서버 응답의 detail도 보여 주지 않는다
   (FastAPI 검증 오류 detail에는 요청 원문이 섞여 돌아올 수 있다). 알려진 경우만 우리 문구로 바꾼다.
+- 인증 (backend#10): /health와 /auth/dev-token 말고는 `Authorization: Bearer <토큰>`이 필요하다.
+  팀 토큰(관리자가 준 값, 서버 API_TOKENS) 또는 개발용 토큰(서버 POST /auth/dev-token이 바로 내주는 값)을 쓴다.
+  개발용 토큰은 서버 메모리에만 있어 서버를 다시 시작하면(배포마다) 무효가 된다. 401이면 한 번 새로 받아 다시 보낸다.
+  토큰은 HTTPS나 이 PC 안의 서버로만 보낸다 (insecure).
+- HTTPS 인증서 고정: 팀 서버는 도메인 없이 자체 서명 인증서를 쓴다 (backend Caddyfile). 시스템이 믿는 인증서가
+  아니므로 사용자가 확인한 인증서의 SHA-256 지문을 고정하고, 연결할 때마다 요청을 보내기 전에 서버 인증서가 그
+  지문과 같은지 본다. 다르면 아무것도 보내지 않고 끊는다 (pin_mismatch). 고정하지 않으면 시스템 인증서 저장소로 확인한다.
 - 서버에 모델이 없으면(400 + LOCAL_PII_MODEL_DIR) 규칙만 모드로 다시 요청하고, 그 사실을 결과에 남긴다.
 - 서버 작업(work_id)은 /process 시점부터 10분 동안만 남고, 복원은 한 번만 된다 (backend sessions.py).
 - 파일 API는 오류도 FileResult(JSON)로 답한다. 보호본은 한 번만 내려받을 수 있다 (backend docs/file-api.md).
 """
 from __future__ import annotations
 
+import functools
+import hashlib
+import hmac
+import http.client
 import json
 import re
+import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -34,19 +47,49 @@ BUSY_RETRIES = 5                    # 429 FILE_PROCESSING_BUSY: 서버는 파일
 HEALTH_RECHECK_SECONDS = 300        # 서버에 모델이 없다고 안 뒤로, 이만큼 지나면 /health로 다시 확인한다
 _WORK_ID = re.compile(r"[0-9A-Za-z_-]{1,64}")
 
+DEV_TOKEN_PATH = "/auth/dev-token"  # 공개: 바로 쓸 수 있는 개발용 토큰 (서버 DISABLE_DEV_TOKEN=1이면 403)
+AUTH_CHECK_PATH = "/policy/current" # api 권한으로 읽기만 하는 경로. 원문 없이 토큰을 확인할 때 쓴다
+PUBLIC_PATHS = frozenset({"/health", DEV_TOKEN_PATH})
+_TOKEN = re.compile(r"[A-Za-z0-9._~+/-]+=*")   # RFC 6750 b64token (헤더에 줄바꿈 등이 들어가지 않게)
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+INSECURE_MESSAGE = "토큰과 글을 암호화되지 않은 연결(HTTP)로 보내지 않아요. 서버 주소를 https://로 바꾸세요."
+PIN_MESSAGE = ("서버 인증서가 신뢰한 인증서와 달라요. 연결을 가로채는 중일 수 있어 아무것도 보내지 않았어요. "
+               "서버 인증서를 바꿨는지 팀에 확인한 뒤 설정 창에서 다시 신뢰하세요.")
+UNTRUSTED_MESSAGE = ("서버 인증서를 확인할 수 없어요 (자체 서명 인증서 등). 설정 창에서 인증서 지문을 "
+                     "팀에서 받은 값과 맞춰 본 뒤 신뢰하세요.")
+# 서버가 요청을 처리하지 않은 게 분명한 오류 (연결·인증 단계에서 멈춤) → 같은 작업으로 다시 시도해도 된다
+NOT_PROCESSED = frozenset({"unreachable", "tls", "untrusted_cert", "pin_mismatch", "insecure",
+                           "unauthorized", "forbidden"})
+CERT_KINDS = frozenset({"untrusted_cert", "pin_mismatch"})
+AUTH_KINDS = frozenset({"unauthorized", "forbidden", "insecure"})
+
 # 앱의 사유 → 서버 사유 (서버에는 false_positive / business_need 두 가지뿐)
 REASONS = {"false_positive": "false_positive", "business_need": "business_need",
            "approved": "business_need", "none": None, None: None}
 
 
 class ServerError(Exception):
-    """kind: unreachable / no_model / expired / failed / rejected / bad_response"""
+    """kind (화면이 안내를 고르는 기준):
 
-    def __init__(self, message: str, kind: str = "failed", status: int | None = None):
+    unreachable     서버에 닿지 않음 (주소·네트워크·프록시·시간 초과)
+    tls             TLS 연결을 맺지 못함 (https가 아닌 포트 등)
+    untrusted_cert  서버 인증서를 믿을 수 없음 (자체 서명 등). 지문을 확인하고 신뢰하면 된다
+    pin_mismatch    서버 인증서가 신뢰한 지문과 다름. 가로채기일 수 있어 아무것도 보내지 않았다
+                    (fingerprint = 지금 서버 인증서 지문)
+    insecure        토큰을 암호화되지 않은 연결(HTTP)로 보내지 않음
+    unauthorized    401: 토큰이 없거나 맞지 않음
+    forbidden       403: 토큰 권한 부족, 또는 서버가 개발용 토큰을 내주지 않음
+    no_model / expired / failed / rejected / bad_response
+    """
+
+    def __init__(self, message: str, kind: str = "failed", status: int | None = None,
+                 fingerprint: str | None = None):
         super().__init__(message)
         self.message = message
         self.kind = kind
         self.status = status
+        self.fingerprint = fingerprint
 
 
 @dataclass
@@ -110,6 +153,108 @@ def is_insecure(url: str) -> bool:
     return parts.scheme != "https" and (parts.hostname or "").lower() not in ("localhost", "127.0.0.1", "::1")
 
 
+def server_key(url: str) -> str:
+    """신뢰한 인증서를 서버별로 저장할 때 쓰는 키: "호스트:포트" (기본 포트 포함)."""
+    parts = urlsplit((url or "").strip())
+    host = (parts.hostname or "").lower()
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def normalize_fingerprint(text) -> str | None:
+    """SHA-256 인증서 지문 → 소문자 64자리 16진수. 형식이 아니면 None.
+
+    openssl 출력("sha256 Fingerprint=AB:CD:…"), 콜론·공백으로 나눈 값, "SHA256:" 접두어를 받는다.
+    """
+    if not isinstance(text, str):
+        return None
+    value = text.strip().lower().split("=", 1)[-1].strip()
+    value = re.sub(r"^sha-?256\s*(fingerprint)?\s*:?", "", value)
+    value = re.sub(r"[\s:]", "", value)
+    return value if _HEX64.fullmatch(value) else None
+
+
+def format_fingerprint(fingerprint: str) -> str:
+    """화면용: AB:CD:… (openssl, 브라우저와 같은 모양)."""
+    value = normalize_fingerprint(fingerprint) or ""
+    return ":".join(value[i:i + 2] for i in range(0, len(value), 2)).upper()
+
+
+def valid_token(token) -> bool:
+    return isinstance(token, str) and 0 < len(token) <= 1024 and _TOKEN.fullmatch(token) is not None
+
+
+class CertificatePinError(Exception):
+    """서버 인증서가 고정한 지문과 다르다. 요청은 보내지 않았다."""
+
+    def __init__(self, fingerprint: str):
+        super().__init__("server certificate does not match the pinned fingerprint")
+        self.fingerprint = fingerprint
+
+
+class _HTTPSConnection(http.client.HTTPSConnection):
+    """TLS 연결을 맺은 직후, 요청을 보내기 전에 서버 인증서 지문을 확인한다 (pin이 있으면 같아야 한다)."""
+
+    def __init__(self, *args, pin: str | None = None, seen: list | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pin = pin
+        self._seen = seen
+
+    def connect(self):
+        super().connect()  # 프록시(HTTPS_PROXY)를 쓰면 CONNECT 터널 안에서 서버와 직접 TLS를 맺는다
+        der = self.sock.getpeercert(binary_form=True) or b""
+        actual = hashlib.sha256(der).hexdigest()
+        if self._seen is not None:
+            self._seen.append(actual)
+        if self._pin is not None and not hmac.compare_digest(actual, self._pin):
+            self.close()
+            raise CertificatePinError(actual)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, context: ssl.SSLContext, pin: str | None = None, seen: list | None = None):
+        super().__init__(context=context)
+        self._pin = pin
+        self._seen = seen
+
+    def https_open(self, req):
+        return self.do_open(functools.partial(_HTTPSConnection, pin=self._pin, seen=self._seen), req,
+                            context=self._context)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """리디렉션을 따라가지 않는다. urllib은 Authorization 헤더를 새 주소로 그대로 옮기므로
+    (https → http, 다른 서버) 토큰이 샐 수 있다. API는 리디렉션을 쓰지 않는다."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _opener(context: ssl.SSLContext, pin: str | None = None, seen: list | None = None):
+    return urllib.request.build_opener(_NoRedirect, _HTTPSHandler(context, pin, seen))
+
+
+def _tls_context(verify: bool) -> ssl.SSLContext:
+    """verify=False는 지문을 고정했거나 지문만 읽을 때다. 그때는 _HTTPSConnection의 지문 확인이 신뢰의 근거다."""
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _connection_error(exc: BaseException) -> ServerError:
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, CertificatePinError):
+        return ServerError(PIN_MESSAGE, "pin_mismatch", fingerprint=reason.fingerprint)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return ServerError(UNTRUSTED_MESSAGE, "untrusted_cert")
+    if isinstance(reason, ssl.SSLError):
+        return ServerError("서버와 암호화 연결(TLS)을 맺지 못했어요. 주소가 https인지, 포트가 맞는지 확인하세요.", "tls")
+    return ServerError("서버에 연결하지 못했어요. 서버 주소와 네트워크를 확인하세요.", "unreachable")
+
+
 def _json(raw: bytes):
     try:
         return json.loads(raw.decode("utf-8"))
@@ -145,13 +290,29 @@ def _http_error(status: int, detail) -> ServerError:
 
 
 class ServerClient:
-    def __init__(self, base_url: str, timeout: float = 20.0):
+    """token: 팀 토큰(있으면 이것만 쓴다). dev_token=True: 팀 토큰이 없을 때 서버에서 개발용 토큰을 받아 쓴다.
+    pin: 신뢰한 서버 인증서의 SHA-256 지문 (https 주소에만 쓴다)."""
+
+    def __init__(self, base_url: str, timeout: float = 20.0, *, token: str | None = None,
+                 dev_token: bool = False, pin: str | None = None):
         url = (base_url or "").strip().rstrip("/")
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("server url must look like https://host[:port]")
+        token = (token or "").strip() or None
+        if token is not None and not valid_token(token):
+            raise ValueError("token must be a bearer token (letters, digits, -._~+/=)")
+        fingerprint = normalize_fingerprint(pin) if pin else None
+        if pin and fingerprint is None:
+            raise ValueError("pin must be a SHA-256 certificate fingerprint")
         self.base_url = url
         self.timeout = timeout
+        self.team_token = token is not None
+        self.dev_token = dev_token and token is None
+        self._token = token            # 개발용 토큰은 처음 필요할 때 받는다. "" = 토큰을 쓰지 않는 서버
+        self._token_lock = threading.Lock()
+        self.pin = fingerprint if parts.scheme == "https" else None
+        self._opener = _opener(_tls_context(self.pin is None), self.pin)
         self.model_available: bool | None = None  # 모름 / 서버에 모델 있음 / 없음(규칙만)
         self.last_health: Health | None = None
 
@@ -159,12 +320,26 @@ class ServerClient:
     def insecure(self) -> bool:
         return is_insecure(self.base_url)
 
+    @property
+    def auth_mode(self) -> str:
+        """team(팀 토큰) / dev(개발용 토큰) / none(토큰 없음)"""
+        return "team" if self.team_token else ("dev" if self.dev_token else "none")
+
+    @property
+    def cert_mode(self) -> str | None:
+        """pinned(지문 고정) / system(시스템 인증서 저장소) / None(HTTP)"""
+        if urlsplit(self.base_url).scheme != "https":
+            return None
+        return "pinned" if self.pin else "system"
+
     def _open(self, method: str, path: str, data: bytes | None, headers: dict, timeout: float | None = None,
-              limit: int = MAX_DOWNLOAD) -> tuple[int, object, bytes]:
-        """→ (HTTP 상태, 헤더, 본문). 4xx·5xx도 본문과 함께 돌려준다. 연결하지 못하면 ServerError(unreachable)."""
+              limit: int = MAX_DOWNLOAD, opener=None) -> tuple[int, object, bytes]:
+        """→ (HTTP 상태, 헤더, 본문). 4xx·5xx도 본문과 함께 돌려준다.
+
+        연결·TLS·인증서 문제는 ServerError(unreachable / tls / untrusted_cert / pin_mismatch)."""
         req = urllib.request.Request(self.base_url + path, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:  # noqa: S310 (설정한 서버 주소)
+            with (opener or self._opener).open(req, timeout=timeout or self.timeout) as resp:
                 raw = resp.read(limit + 1)
                 if len(raw) > limit:
                     raise ServerError("서버 응답이 너무 커요.", "bad_response", resp.status)
@@ -177,12 +352,108 @@ class ServerClient:
             finally:
                 exc.close()
             return exc.code, exc.headers, raw
-        except (urllib.error.URLError, TimeoutError, OSError):
-            raise ServerError("서버에 연결하지 못했어요. 서버 주소와 네트워크를 확인하세요.", "unreachable") from None
+        except CertificatePinError as exc:
+            raise ServerError(PIN_MESSAGE, "pin_mismatch", fingerprint=exc.fingerprint) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise _connection_error(exc) from None
+        except http.client.HTTPException:
+            raise ServerError("서버 응답을 읽지 못했어요.", "bad_response") from None
+
+    # ------------------------------------------------------------------ 인증 (backend#10)
+    def _token_now(self) -> str | None:
+        if not self.dev_token:
+            return self._token
+        with self._token_lock:
+            if self._token is None:
+                self._token = self._issue_dev_token()
+            return self._token or None
+
+    def _drop_token(self, token: str | None) -> None:
+        with self._token_lock:
+            if (self._token or None) == token:
+                self._token = None
+
+    def _issue_dev_token(self) -> str:
+        """POST /auth/dev-token → 토큰. 발급 경로가 없는 서버(인증 전 backend)는 ""(토큰 없이 보냄)."""
+        if self.insecure:
+            raise ServerError(INSECURE_MESSAGE, "insecure")
+        status, _, raw = self._open("POST", DEV_TOKEN_PATH, json.dumps({"scope": "api"}).encode("utf-8"),
+                                    {"Content-Type": "application/json", "Accept": "application/json"},
+                                    min(self.timeout, 10.0), limit=4096)
+        if status == 404:
+            return ""
+        if status == 403:
+            raise ServerError("이 서버는 개발용 토큰을 내주지 않아요 (운영 서버). "
+                              "관리자에게 팀 토큰을 받아 설정 창에 넣으세요.", "forbidden", status)
+        if status >= 400:
+            raise _http_error(status, None)
+        data = _json(raw)
+        token = data.get("token") if isinstance(data, dict) else None
+        if not valid_token(token):
+            raise ServerError("서버가 보낸 토큰 형식이 달라요.", "bad_response", status)
+        return token
+
+    def _auth_error(self, status: int, token: str | None) -> ServerError:
+        if status == 403:
+            return ServerError("이 토큰으로는 할 수 없는 요청이에요 (권한 부족). 관리자에게 확인하세요.", "forbidden", status)
+        if token is None:
+            message = "서버가 토큰을 요구해요. 설정 창에서 팀 토큰을 넣거나 개발용 토큰을 쓰세요."
+        elif self.dev_token:
+            message = "개발용 토큰을 새로 받았는데도 서버가 받지 않았어요. 잠시 뒤 다시 시도하세요."
+        else:
+            message = "서버가 팀 토큰을 받지 않았어요. 설정 창에서 토큰을 확인하세요 (만료됐거나 잘못 입력)."
+        return ServerError(message, "unauthorized", status)
+
+    def _send(self, method: str, path: str, data: bytes | None, headers: dict, timeout: float | None = None,
+              limit: int = MAX_DOWNLOAD) -> tuple[int, object, bytes]:
+        """토큰을 붙여 보낸다. 개발용 토큰이 401이면(서버를 다시 시작해 잊음) 한 번 새로 받아 다시 보낸다.
+        401·403은 ServerError(unauthorized·forbidden)로 알린다."""
+        public = path in PUBLIC_PATHS
+        for attempt in range(2):
+            sent = dict(headers)
+            token = None if public else self._token_now()
+            if token:
+                if self.insecure:
+                    raise ServerError(INSECURE_MESSAGE, "insecure")
+                sent["Authorization"] = f"Bearer {token}"
+            status, resp_headers, raw = self._open(method, path, data, sent, timeout, limit)
+            if status == 401 and not public and self.dev_token and attempt == 0:
+                self._drop_token(token)
+                continue
+            if status in (401, 403) and not public:
+                raise self._auth_error(status, token)
+            return status, resp_headers, raw
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def check_auth(self) -> str:
+        """원문 없이 토큰을 확인한다 → "ok" / "unknown"(확인 경로가 없는 서버). 실패는 ServerError."""
+        status, _, raw = self._send("GET", AUTH_CHECK_PATH, None, {"Accept": "application/json"},
+                                    min(self.timeout, 10.0), limit=64 * 1024)
+        if status == 404:
+            return "unknown"
+        if status >= 400:
+            raise _http_error(status, _detail(raw))
+        return "ok"
+
+    def probe_certificate(self) -> str:
+        """서버가 내보이는 인증서의 SHA-256 지문을 읽기만 한다 (믿고 쓰기 전에 사용자가 확인하는 용도).
+
+        공개 /health만 요청하고 토큰·글은 보내지 않는다."""
+        if urlsplit(self.base_url).scheme != "https":
+            raise ServerError("https 주소만 인증서가 있어요.", "insecure")
+        seen: list[str] = []
+        opener = _opener(_tls_context(False), None, seen)
+        try:
+            self._open("GET", "/health", None, {"Accept": "application/json"}, min(self.timeout, 5.0),
+                       64 * 1024, opener=opener)
+        except ServerError:
+            if not seen:
+                raise
+        return seen[-1]
 
     def _request(self, method: str, path: str, body=None, timeout: float | None = None):
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
-        status, _, raw = self._open(method, path, data, {"Content-Type": "application/json",
+        status, _, raw = self._send(method, path, data, {"Content-Type": "application/json",
                                                          "Accept": "application/json"}, timeout)
         if status >= 400:
             raise _http_error(status, _detail(raw))
@@ -260,7 +531,7 @@ class ServerClient:
         body, content_type = _multipart("file", UPLOAD_NAME, data, XLSX_MEDIA_TYPE)
         headers = {"Content-Type": content_type, "Accept": "application/json"}
         for attempt in range(retries + 1):
-            status, resp_headers, raw = self._open("POST", "/files/sanitize", body, headers,
+            status, resp_headers, raw = self._send("POST", "/files/sanitize", body, headers,
                                                    max(self.timeout, FILE_TIMEOUT), limit=64 * 1024)
             out = _json(raw)
             if not isinstance(out, dict) or out.get("status") not in ("READY", "BLOCKED", "FAILED"):
@@ -289,7 +560,7 @@ class ServerClient:
         """READY 보호본을 받는다. 서버는 한 번만 내주고 바로 지운다 (두 번째는 404 FILE_NOT_AVAILABLE)."""
         if not _WORK_ID.fullmatch(work_id or ""):
             raise ServerError("서버 응답 형식이 달라요.", "bad_response")
-        status, headers, raw = self._open("GET", f"/files/{quote(work_id)}/download", None,
+        status, headers, raw = self._send("GET", f"/files/{quote(work_id)}/download", None,
                                           {"Accept": XLSX_MEDIA_TYPE}, max(self.timeout, 60.0))
         if status == 404:
             raise ServerError("서버에서 보호본을 받지 못했어요. 이미 받았거나 10분이 지나 지워졌어요.", "expired", status)
