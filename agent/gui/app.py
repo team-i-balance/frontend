@@ -7,6 +7,7 @@ from __future__ import annotations
 import queue
 import secrets
 import sys
+import os
 import threading
 import time
 import tkinter as tk
@@ -33,6 +34,7 @@ else:
     from . import tray
 from .file_window import FileWindow
 from .restore_window import RestoreWindow
+from .reason_followup import ReasonFollowUp
 from .review import ReviewWindow
 from .samples import SAMPLES
 from .server_review import ServerRestoreWindow, ServerReviewWindow
@@ -112,6 +114,8 @@ class App:
         self.browser = None
         self.browser_actions = BrowserActions(self)
         self.overlay = NativeOverlay(self)
+        self.reasons = ReasonFollowUp(self)  # 보안팀의 사유 (재)요청 (#24)
+        self.reasons.start()
         if self.settings.get("browser_key"):
             self.start_browser()
         self.tray = tray.Tray(self) if tray.available() else None
@@ -286,28 +290,41 @@ class App:
 
         threading.Thread(target=work, daemon=True, name="server-health").start()
 
+    def decide_context(self, target_ai: str | None = None) -> dict:
+        """/process/decide에 함께 보내는 직원·대상 AI (backend#63). 비어 있으면 보내지 않는다."""
+        context = {"user_id": os.environ.get("KPGUARD_USER_ID") or self.settings.get("user_id", ""),
+                   "dept": os.environ.get("KPGUARD_DEPT") or self.settings.get("dept", "")}
+        if target_ai:
+            context["target_ai"] = target_ai
+        return context
+
     def server_decide(self, result, action: str, reason: str | None = None, retry_text: str | None = None,
-                      tokens=frozenset()) -> None:
-        """사용자 선택을 서버에 기록한다 (작업 스레드). 작업이 만료됐으면 같은 글로 한 번 다시 검사해 기록한다."""
+                      tokens=frozenset(), reverted=None, target_ai: str | None = None) -> None:
+        """사용자 선택을 서버에 기록한다 (작업 스레드). 작업이 만료됐으면 같은 글로 한 번 다시 검사해 기록한다.
+
+        reverted: revert_original에서 원문으로 되돌린 서버 자리표시. 다시 검사하면 자리표시가 달라질 수 있어
+        그때는 목록 없이(전부 되돌림으로) 기록한다 — 보안팀에 덜 보이는 쪽보다 더 보이는 쪽을 택한다."""
         server = self.server
         if server is None or result is None:
             return
+        context = self.decide_context(target_ai)
 
         def work():
             work_id, processed_at = result.work_id, result.received_at
             try:
                 try:
-                    out = server.decide(work_id, action, reason)
+                    out = server.decide(work_id, action, reason, reverted=reverted, context=context)
                 except ServerError as exc:
                     if exc.kind != "expired" or retry_text is None:
                         raise
                     again = server.process(retry_text)
                     work_id, processed_at = again.work_id, again.received_at
-                    out = server.decide(work_id, action, reason)
+                    out = server.decide(work_id, action, reason, context=context)
             except ServerError as exc:
                 if action != "cancel":
                     self.post("server_decided", None, exc.message)
                 return
+            self.post("call", self.reasons.note, out, action)
             if out.restore_available and tokens:
                 self.post("server_decided", ServerWork(work_id, frozenset(tokens), processed_at), None)
 

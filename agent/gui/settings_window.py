@@ -110,6 +110,16 @@ class SettingsWindow(tk.Toplevel):
         self.server_info = theme.label(pbox.body, "", wraplength=px(300))
         self.server_info.pack(fill="x", pady=(px(8), 0))
 
+        # ---------------------------------------------------------------- 직원 정보 (서버 기록에 함께)
+        who = theme.Card(col1, title="직원 정보", caption="원문을 보낼 때 보안팀 기록에 함께 남아요", fit=True)
+        who.pack(fill="x", pady=(px(16), 0))
+        self.v_user = tk.StringVar(value=app.settings.get("user_id", ""))
+        self.v_dept = tk.StringVar(value=app.settings.get("dept", ""))
+        for caption, var in (("사번 또는 이름", self.v_user), ("부서", self.v_dept)):
+            theme.label(who.body, caption).pack(fill="x", pady=(0, px(4)))
+            theme.Input(who.body, textvariable=var).pack(fill="x", pady=(0, px(8)))
+        theme.Button(who.body, "저장", self._save_person, size="sm").pack(anchor="w")
+
         # ---------------------------------------------------------------- 열기
         act = theme.Card(col2, title="열기", fit=True)
         act.pack(fill="x")
@@ -280,6 +290,12 @@ class SettingsWindow(tk.Toplevel):
         if self.app.server is None:
             self.app.toast("서버 주소는 https://주소[:포트] 형식으로 적어 주세요", tone="warning")
         self.refresh()
+
+    def _save_person(self) -> None:
+        self.app.settings["user_id"] = self.v_user.get().strip()[:64]
+        self.app.settings["dept"] = self.v_dept.get().strip()[:128]
+        self.app.save_settings()
+        self.app.toast("직원 정보를 저장했어요")
 
     def _open_auth(self) -> None:
         dialog = getattr(self, "auth_dialog", None)

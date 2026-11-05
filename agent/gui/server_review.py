@@ -662,9 +662,12 @@ class ServerReviewWindow(tk.Toplevel):
             self.app.toast("고친 내용을 서버에서 다시 검사하고 있어요. 끝나면 다시 눌러 주세요.", tone="warning")
             return
         self.app.copy_to_clipboard(self.outgoing)
-        action = "send_as_is" if g == "O" else "send_transformed"
+        # 원문이 하나라도 나가면 revert_original(+되돌린 자리표시): 보안팀 검토에서 빠지지 않게 (#25)
+        reverted = sorted(t for t in self.reverted if any(it.token == t and it.exact for it in self.items))
+        raw_out = bool(reverted or self.org_reverted or self.released)
+        action = "send_as_is" if g == "O" else ("revert_original" if raw_out else "send_transformed")
         self.app.server_decide(self.result, action, self._reason(), retry_text=self.result_sent,
-                               tokens=self._sent_tokens())
+                               tokens=self._sent_tokens(), reverted=reverted or None, target_ai=self._target())
         self._log_local("sent_sanitized")
         self.app.toast("변환문을 복사했어요. Claude Code·Codex·채팅창에 붙여넣으세요 (Ctrl+V)." if g != "O"
                        else "복사했어요. 붙여넣어 사용하세요.")
@@ -675,21 +678,33 @@ class ServerReviewWindow(tk.Toplevel):
         btn = self.btn_original
         panel = self._chip_at(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
         panel.anchor = (btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height(), btn.winfo_rooty())
-        blocked = self.grade() == "C"
-        note = ("기밀로 판정된 내용이에요. 외부 AI에 보내면 보안 검토 대상으로 기록돼요." if blocked
+        if self.grade() == "C":
+            # 이 PC가 기밀로 막은 글: 서버는 이 표시를 모른다(서버 등급이 C가 아님). 원문 전송은 막는다 (#26)
+            panel.show(title="원문 그대로 사용", note="기밀로 표시된 부분이 있어 원문으로 보낼 수 없어요. 그 부분을 눌러 "
+                       "'이 부분 빼고 다시 검사'·'차단 해제(사유)'를 고르거나 사내 AI를 이용하세요.", note_tone="warning",
+                       chips=[Chip("사내 AI에서 처리", lambda: (self._close_chip(), self.on_internal()))])
+            return
+        confidential = self.grade() == "C2"
+        note = ("기밀로 판정된 내용이에요. 원문으로 보내면 보안팀 검토 건으로 기록돼요." if confidential
                 else "원문은 저장하지 않고, 유형·건수·사유와 원문 해시가 서버 로그에 남아요.")
-        panel.show(title="원문 그대로 사용 · 사유", note=note, note_tone="warning" if blocked else "info",
+        panel.show(title="원문 그대로 사용 · 사유", note=note, note_tone="warning" if confidential else "info",
                    chips=[Chip(name, lambda code=code: self._send_original(code)) for code, name in REASONS])
 
     def _send_original(self, reason: str) -> None:
         self._close_chip()
+        if self.grade() == "C":
+            return
         self.app.copy_to_clipboard(self._text())
         if self._fresh():
             action = "send_as_is" if self.grade() == "O" else "revert_original"
-            self.app.server_decide(self.result, action, reason)
+            self.app.server_decide(self.result, action, reason, target_ai=self._target())
         self._log_local("sent_original", reason=reason)
         self.app.toast("원문을 복사했어요 · 고른 사유가 기록됐어요")
         self._close()
+
+    def _target(self) -> str | None:
+        """대상 AI: 입력창 칩·하이라이트에서 온 글은 브라우저 Claude. 직접 붙여넣은 글은 알 수 없다."""
+        return "Claude (claude.ai)" if self.source in ("overlay", "chip", "browser") else None
 
     def on_cancel(self) -> None:
         if self._fresh():

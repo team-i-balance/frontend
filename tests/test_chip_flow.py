@@ -88,7 +88,9 @@ class ServerChipTests(unittest.TestCase):
         self.assertEqual(final, "[이름_1] 님 번호 [전화번호_1], 다시 [전화번호_1]")
         self.assertEqual(self.actions.preview(final, "tab")["spans"], [])
         self.assertTrue(wait_until(lambda: self.server.decide.called))
-        self.server.decide.assert_called_once_with(self.process_for(text).work_id, "send_transformed", None)
+        self.server.decide.assert_called_once()
+        self.assertEqual(self.server.decide.call_args.args, (self.process_for(text).work_id, "send_transformed", None))
+        self.assertIsNone(self.server.decide.call_args.kwargs["reverted"])  # 전부 가렸다
         self.server.restore.return_value = RestoreResult(f"답: 김민수 {PHONE}", [], [])
         reply = self.actions.handle({"action": "restore", "channel": "tab", "text": "답: [이름_1] [전화번호_1]"})
         self.assertEqual(reply["text"], f"답: 김민수 {PHONE}")

@@ -67,6 +67,10 @@ AUTH_KINDS = frozenset({"unauthorized", "forbidden", "insecure"})
 # 앱의 사유 → 서버 사유 (서버에는 false_positive / business_need 두 가지뿐)
 REASONS = {"false_positive": "false_positive", "business_need": "business_need",
            "approved": "business_need", "none": None, None: None}
+# 서버 사유 값이 같아도 보안팀이 구분하도록 사유 글로 함께 보낸다 (#27)
+REASON_TEXTS = {"approved": "승인된 개인정보", "business_need": "업무상 필요", "false_positive": "오탐(개인정보 아님)"}
+# 나중에 사유를 낼 수 있는 서버 사유 (POST /events/{id}/reason)
+SERVER_REASONS = ("business_need", "false_positive")
 
 
 class ServerError(Exception):
@@ -127,6 +131,8 @@ class DecideResult:
     outgoing_text: str | None
     restore_available: bool
     queue: str | None
+    event_id: int | None = None          # 나중에 사유를 확인·제출할 때 (#24)
+    reason_requested: bool = False       # 서버가 사유를 요청해 둔 기록
 
 
 @dataclass
@@ -521,14 +527,42 @@ class ServerClient:
         except (KeyError, TypeError, ValueError):
             raise ServerError("서버 응답 형식이 달라요.", "bad_response") from None
 
-    def decide(self, work_id: str, action: str, reason: str | None = None) -> DecideResult:
-        data = self._request("POST", "/process/decide",
-                             {"work_id": work_id, "action": action, "reason": REASONS.get(reason)})
+    def decide(self, work_id: str, action: str, reason: str | None = None, *, reverted=None,
+               reason_text: str | None = None, context: dict | None = None) -> DecideResult:
+        """결정 기록. reverted: revert_original에서 원문으로 되돌린 서버 자리표시만 (None이면 전부).
+        context: user_id·dept·target_ai (backend#63). 사유 글은 사유를 고른 경우에만 보낸다."""
+        body = {"work_id": work_id, "action": action, "reason": REASONS.get(reason)}
+        if body["reason"] is not None:
+            text = (reason_text or REASON_TEXTS.get(reason) or "").strip()[:500]
+            if text:
+                body["reason_text"] = text
+        if action == "revert_original" and reverted:
+            body["reverted"] = sorted(set(reverted))[:500]
+        for key, value in (context or {}).items():
+            if key in ("user_id", "dept", "target_ai") and isinstance(value, str) and value.strip():
+                body[key] = value.strip()[:64 if key == "user_id" else 128]
+        data = self._request("POST", "/process/decide", body)
         try:
-            return DecideResult(data.get("outgoing_text"), bool(data.get("restore_available")),
-                                (data.get("event") or {}).get("queue"))
+            event = data.get("event") or {}
+            event_id = event.get("id")
+            return DecideResult(data.get("outgoing_text"), bool(data.get("restore_available")), event.get("queue"),
+                                event_id if isinstance(event_id, int) else None,
+                                bool(event.get("reason_requested_at")))
         except AttributeError:
             raise ServerError("서버 응답 형식이 달라요.", "bad_response") from None
+
+    def reason_status(self, event_id: int) -> dict:
+        """보안팀이 사유를 (다시) 요청했는지: {reason_needed, reason_requested_at, reason, reason_at}."""
+        data = self._request("GET", f"/events/{int(event_id)}/reason")
+        if not isinstance(data, dict) or "reason_needed" not in data:
+            raise ServerError("서버 응답 형식이 달라요.", "bad_response")
+        return data
+
+    def submit_reason(self, event_id: int, reason: str, text: str) -> None:
+        """나중에 낸 사유 (1~500자)."""
+        if reason not in SERVER_REASONS or not 1 <= len(text.strip()) <= 500:
+            raise ServerError("사유와 설명(1~500자)을 입력해 주세요.", "bad_request")
+        self._request("POST", f"/events/{int(event_id)}/reason", {"reason": reason, "text": text.strip()})
 
     def restore(self, work_id: str, text: str) -> RestoreResult:
         data = self._request("POST", "/process/restore", {"work_id": work_id, "text": text})
