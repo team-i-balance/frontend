@@ -16,18 +16,16 @@ from collections import Counter
 from urllib.parse import urlsplit
 
 from ..detect import lexicon, rules
-from ..detect.scoring import AUTO_APPLY
 from ..detect.span import TYPE_LABELS
 from ..events.log import REASON_PRIORITY
 from ..sanitize.restore import restore as local_restore
-from ..server.align import LABEL_TYPE, Repl, align, compose, premask, to_orig
+from ..server.align import LABEL_TYPE, PLACEHOLDER, Repl, align, compose, premask, to_orig
 from ..server.client import ServerError
 from ..system import win32
 from . import theme
 from .restore_window import build_restore_layout
 from .review import MISSED_TYPES, REASON_SHORT, REASONS, ReasonDialog, Tooltip, _short, build_layout, shape_of
 
-ORG_TYPES = {"codename", "client", "internal_host"}
 SERVER_COLUMNS = (("type", "유형", 120), ("orig", "원문", 180), ("repl", "보낼 값", 170),
                   ("state", "상태", 190), ("why", "탐지", 330))
 
@@ -51,7 +49,7 @@ class ServerReviewWindow(tk.Toplevel):
         self.released: dict[tuple, str] = {}     # 기밀 항목 키 → 차단 해제 사유
         self.manual: list[tuple[str, str]] = []  # (유형, 값) 놓친 정보 신고
         self.blockers = []
-        self.org = []
+        self.org = []                 # 조직 베이스 값이 나온 모든 자리 (서버로 보내기 전에 모두 가린다)
         self.repls: list[Repl] = []   # 서버로 보내기 전에 이 PC에서 태그로 바꾼 구간 (마지막 결과 기준)
         self.result_sent = ""          # 마지막 결과를 받을 때 서버로 보낸 글
         self.segs = []
@@ -185,12 +183,14 @@ class ServerReviewWindow(tk.Toplevel):
         ignore = self.app.ignore
         cr = rules.code_ranges(text)
         self.blockers = [b for b in lexicon.detect_blockers(text, self.app.base, cr) if b.value not in ignore]
-        seen, org = set(), []
-        for s in lexicon.detect_all(text, self.app.base):
-            if s.type in ORG_TYPES and s.confidence >= AUTO_APPLY and s.value not in ignore and s.value not in seen:
-                seen.add(s.value)
-                org.append(s)
-        self.org = org
+        self.org = lexicon.org_spans(text, self.app.base, ignore)
+
+    def _org_values(self):
+        """조직 베이스 값마다 처음 나온 자리 하나 (표·통계용)."""
+        first = {}
+        for s in self.org:
+            first.setdefault(s.value, s)
+        return list(first.values())
 
     # ================================================================== 상태
     def _active_blockers(self):
@@ -319,7 +319,7 @@ class ServerReviewWindow(tk.Toplevel):
             repl = "(원문 유지)" if it.token in self.reverted else it.token
             why = "서버 탐지 · " + ("규칙" if self.result and self.result.rules_only else "모델+규칙")
             rows.append((("t", it.token), it.label, value, repl, state, why, tag))
-        for s in self.org:
+        for s in self._org_values():
             reverted = s.value in self.org_reverted
             rows.append((("o", s.value), TYPE_LABELS[s.type], theme.masked(s.value),
                          "(원문 유지)" if reverted else self.app.session.tag_for(s.type, s.value),
@@ -550,12 +550,13 @@ class ServerReviewWindow(tk.Toplevel):
 
     def _log_local(self, action: str, reason: str | None = None) -> None:
         """이 PC의 통계용 기록 (원문 없이 유형·건수·사유만). 서버 기록은 /decide가 한다."""
-        types = [LABEL_TYPE.get(it.label, "other") for it in self.items] + [s.type for s in self.org]
+        org = self._org_values()
+        types = [LABEL_TYPE.get(it.label, "other") for it in self.items] + [s.type for s in org]
         types += [typ for typ, _ in self.manual] + [b.type for b in self.blockers]
         if not types:
             return
         reverted = ([LABEL_TYPE.get(it.label, "other") for it in self.items if it.token in self.reverted]
-                    + [s.type for s in self.org if s.value in self.org_reverted])
+                    + [s.type for s in org if s.value in self.org_reverted])
         grade = {"C": "C", "C2": "C", "S": "S"}.get(self.grade(), "O")
         self.app.log.record(service=f"server:{self.source}", grade=grade, action=action, detect_types=types,
                             counts=dict(Counter(types)), reverted_types=reverted,
@@ -654,12 +655,13 @@ class ServerRestoreWindow(tk.Toplevel):
         self.focus_force()
         self.after(100, self._poll)
 
-    def _update_info(self, note: str = "", restored: bool = False, failed: bool = False) -> None:
+    def _update_info(self, note: str = "", restored: bool = False, failed: bool = False, warn: bool = False) -> None:
         work = self.app.server_work
         if failed:
             tone, title, msg = "danger", "서버에서 복원하지 못했어요", ""
         elif restored:
-            tone, title = "success", "서버에서 원래 값으로 복원했어요"
+            tone = "warning" if warn else "success"
+            title = "서버에서 복원했어요 · 확인이 필요해요" if warn else "서버에서 원래 값으로 복원했어요"
             msg = "이 작업은 서버에서 지워져 다시 복원할 수 없어요"
         elif work and work.alive():
             left = int(work.expires_in() // 60)
@@ -676,7 +678,7 @@ class ServerRestoreWindow(tk.Toplevel):
             return
         work = self.app.server_work
         if not (work and work.alive()) or self.app.server is None:
-            self._show(reply, reply, "")
+            self._show(reply, reply, self._file_note(set(), {m.group() for m in PLACEHOLDER.finditer(reply)}))
             return
         self.app.server_work = None  # 서버는 한 번 복원하면 작업을 지운다
         self.btn_run.configure(state="disabled", text="복원 중…")
@@ -710,10 +712,28 @@ class ServerRestoreWindow(tk.Toplevel):
             note = f"그대로 둔 비밀값 {len(res.blocked)}개" if res.blocked else ""
             if res.unknown:
                 note += (" · " if note else "") + f"이번 작업에 없는 자리표시 {len(res.unknown)}개는 그대로 뒀어요"
-            self._show(reply, res.text, note, restored=True)
+            tokens = {m.group() for m in PLACEHOLDER.finditer(reply)}
+            swapped = tokens - set(res.unknown) - set(res.blocked)
+            files = self._file_note(swapped, tokens & set(res.unknown))
+            self._show(reply, res.text, "\n".join(x for x in (note, files) if x), restored=True,
+                       warn=bool(swapped & self.app.recent_file_tokens()))
         self.after(100, self._poll)
 
-    def _show(self, reply: str, server_text: str, note: str, restored: bool = False, failed: bool = False) -> None:
+    def _file_note(self, swapped: set, left: set) -> str:
+        """서버 파일 보호본에도 같은 자리표시가 쓰였을 수 있다 (프롬프트와 파일은 서버에서 번호를 따로 매긴다)."""
+        files = self.app.recent_file_tokens()
+        clash, kept = sorted(swapped & files), sorted(left & files)
+        lines = []
+        if clash:
+            more = " 등" if len(clash) > 3 else ""
+            lines.append(f"• {', '.join(clash[:3])}{more}은(는) 최근 서버에서 검사한 파일 보호본에도 있던 자리표시예요. "
+                         "프롬프트 값으로 바꿨으니, 파일 내용을 가리킨 거라면 틀린 값이에요. 확인하세요.")
+        if kept:
+            lines.append(f"• 파일 보호본의 자리표시 {len(kept)}개는 아직 복원할 수 없어 그대로 뒀어요 (서버에 파일 복원 기능이 없어요).")
+        return "\n".join(lines)
+
+    def _show(self, reply: str, server_text: str, note: str, restored: bool = False, failed: bool = False,
+              warn: bool = False) -> None:
         """서버 결과에 이 PC의 매핑(조직 베이스 태그)까지 되돌리고, 서버가 바꾼 곳에 밑줄을 긋는다."""
         text, local_ranges = local_restore(server_text, self.app.session.entries)
         ranges = local_ranges if server_text == reply else [
@@ -725,7 +745,7 @@ class ServerRestoreWindow(tk.Toplevel):
         for s, e in ranges:
             self.dst.tag_add("restored", theme.index(s), theme.index(e))
         self.dst.configure(state="disabled")
-        self._update_info(note, restored, failed)
+        self._update_info(note, restored, failed, warn)
         if not failed:  # 지금 할 일이 '복사'로 바뀐다
             self.btn_run.configure(text="복원 결과 복사", command=self._copy)
 

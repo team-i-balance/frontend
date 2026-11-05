@@ -13,7 +13,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..detect.pipeline import KnownValues, detect
+from ..detect import lexicon, rules
+from ..detect.pipeline import Detection, KnownValues, detect
 from ..detect.scoring import AUTO_APPLY
 from ..detect.span import Span
 from ..sanitize.engine import make_items, sanitize
@@ -36,7 +37,25 @@ REASON_MESSAGES = {
     "COPY_VERIFICATION_ERROR": "보호본을 검증하지 못해 만들지 않았어요.",
     "MODEL_FAILED": "소형 모델 검사에 실패해 보호본을 만들지 않았어요. 설정에서 모델을 끄면 규칙·사전으로만 검사해요.",
     "DEPENDENCY_MISSING": "파일 검사에 필요한 모듈이 설치돼 있지 않아요 (openpyxl, defusedxml).",
+    # 서버 처리 모드 (backend /files/sanitize, /files/{work_id}/download)
+    "SERVER_CONFIDENTIAL": "서버 검사에서 비밀값(API 키·토큰·비밀번호)이나 기밀 내용이 나와 보호본을 만들지 않았어요. "
+                           "사내 AI를 이용하세요.",
+    "SERVER_UNSET": "서버 주소가 설정돼 있지 않아요. 설정 창에서 지정하거나 이 PC에서 검사하세요.",
+    "SERVER_UNREACHABLE": "서버에 연결하지 못했어요. 서버 주소와 네트워크를 확인하세요.",
+    "MODEL_UNAVAILABLE": "서버에 탐지 모델이 없어 파일을 검사할 수 없어요 (서버 파일 검사는 모델이 있어야 해요).",
+    "FILE_PROCESSING_BUSY": "서버가 다른 파일을 처리하고 있어요. 잠시 후 다시 시도하세요.",
+    "FILE_STORE_FULL": "서버 보관 공간이 가득 찼어요. 10분쯤 지나 다시 시도하세요.",
+    "FILE_NOT_AVAILABLE": "서버에서 보호본을 받지 못했어요. 이미 받았거나 10분이 지나 지워졌어요. 다시 검사하세요.",
+    "PROCESSING_ERROR": "서버에서 검사 중 오류가 나서 보호본을 만들지 않았어요.",
+    "PROCESSING_CANCELLED": "서버 검사가 중간에 끊겼어요. 다시 시도하세요.",
+    "SERVER_REJECTED": "서버가 파일 요청을 받지 않았어요. 서버 버전을 확인하세요.",
+    "SERVER_ERROR": "서버에서 검사하지 못했어요.",
+    "SERVER_COPY_INVALID": "서버가 보낸 보호본이 올린 사본과 맞지 않아 쓰지 않았어요. 다시 검사하세요.",
 }
+# 서버 쪽 문제라 이 PC에서 검사하면 보호본을 만들 수 있는 경우
+FALLBACK_REASONS = frozenset({"SERVER_UNSET", "SERVER_UNREACHABLE", "MODEL_UNAVAILABLE", "FILE_PROCESSING_BUSY",
+                              "FILE_STORE_FULL", "FILE_NOT_AVAILABLE", "PROCESSING_ERROR", "PROCESSING_CANCELLED",
+                              "SERVER_REJECTED", "SERVER_ERROR", "SERVER_COPY_INVALID"})
 
 # 재검사에서 우리가 넣은 값 뒤에 붙은 조사만 남으면 남은 민감정보로 보지 않는다
 _JOSA = {"이", "가", "은", "는", "을", "를", "의", "도", "만", "에", "에게", "한테", "께", "께서", "와", "과",
@@ -92,6 +111,9 @@ class EngineProcessor:
             self.coverage = "model_failed"
         return det
 
+    def _items(self, det):
+        return make_items(det, {})
+
     # ------------------------------------------------------------------ Processor
     def process(self, session_id, segments):
         from .xlsx.sanitizer import Decision
@@ -111,7 +133,7 @@ class EngineProcessor:
         results = {}
         for t in texts:
             det = self._detect(t, values) if values.info else first[t]
-            items = make_items(det, {})
+            items = self._items(det)
             results[t] = (items, sanitize(t, items, self.session))
 
         decisions = {}
@@ -158,6 +180,27 @@ class EngineProcessor:
         return True
 
 
+class OrgProcessor(EngineProcessor):
+    """서버 처리 모드의 첫 단계 (이 PC): 서버에 없는 것만 한다.
+
+    - 조직 베이스(코드네임·고객사·사내 도메인)는 점검 창과 같은 태그([프로젝트A], [고객사A], [사내도메인])로 바꾼다.
+      같은 Session을 쓰므로 AI 답변의 태그는 이 PC의 '답변 복원'에서 되돌릴 수 있다.
+    - 기밀 표기·사내 소스코드가 있으면 막는다 → 파일이 서버로 가지 않는다.
+    개인정보 탐지·가명화는 서버가 한다.
+    """
+
+    def __init__(self, base: dict, session, *, ignore=frozenset()):
+        super().__init__(base, session, ignore=ignore, model=None)
+
+    def _detect(self, text: str, known=None):
+        blockers = [b for b in lexicon.detect_blockers(text, self.base, rules.code_ranges(text))
+                    if b.value not in self.ignore]
+        return Detection(lexicon.org_spans(text, self.base, self.ignore), blockers)
+
+    def _items(self, det):
+        return make_items(det, {s.key: {"strategy": "tag"} for s in det.spans})
+
+
 # ====================================================================== 앱에서 부르는 함수
 @dataclass
 class FileReport:
@@ -173,6 +216,11 @@ class FileReport:
     blocker_types: Counter = field(default_factory=Counter)
     coverage: str = "rules"
     suggested_name: str = "보호본.xlsx"
+    # 서버 처리 모드
+    where: str = "local"                      # local / server
+    org_found: Counter = field(default_factory=Counter)   # 서버로 보내기 전에 이 PC에서 가린 조직 베이스
+    server_tokens: frozenset = frozenset()    # 서버가 넣은 자리표시 ([이름_1] 등). 값은 없다
+    fallback: bool = False                    # 서버 쪽 문제 → '이 PC에서 검사'를 권한다
 
     @property
     def message(self) -> str:

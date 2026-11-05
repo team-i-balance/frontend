@@ -36,6 +36,9 @@ HOTKEYS = {
 }
 PAUSE_SECONDS = 30 * 60
 MAX_CLIP_LEN = 50_000
+# 서버에서 검사한 파일의 자리표시를 기억하는 시간 (값은 없이 [이름_1] 같은 글자만).
+# 프롬프트 복원에서 같은 자리표시가 나오면 파일 쪽 값일 수 있다고 알려 준다.
+FILE_TOKEN_SECONDS = 60 * 60
 # 복사할 때마다 도는 자동 점검은 짧은 글에만 모델을 쓴다 (메인 스레드를 오래 잡지 않게).
 # 긴 글은 규칙·사전으로 창을 띄울지 정하고, 창을 직접 열면 모델로 다시 검사한다.
 CLIP_MODEL_MAX_CHARS = 2000
@@ -86,6 +89,7 @@ class App:
         # 서버 처리: 탐지·가명화·기록·복원은 팀 서버(backend /process)가 한다
         self.server: ServerClient | None = None
         self.server_work: ServerWork | None = None
+        self.file_tokens: dict[str, float] = {}   # 서버 파일 보호본의 자리표시 → 받은 시각
         self.server_status = "확인 전"
         self._setup_server()
         if self.server_mode():
@@ -190,6 +194,17 @@ class App:
                 self.post("server_decided", ServerWork(work_id, frozenset(tokens), processed_at), None)
 
         threading.Thread(target=work, daemon=True, name="server-decide").start()
+
+    def note_file_tokens(self, tokens) -> None:
+        now = time.time()
+        for token in tokens:
+            self.file_tokens[token] = now
+
+    def recent_file_tokens(self) -> set[str]:
+        """최근 서버에서 검사한 파일 보호본에 들어간 자리표시. 서버에 파일 복원 기능이 없어 복원은 못 한다."""
+        cutoff = time.time() - FILE_TOKEN_SECONDS
+        self.file_tokens = {t: at for t, at in self.file_tokens.items() if at >= cutoff}
+        return set(self.file_tokens)
 
     def set_model(self, folder: str | None = None, enabled: bool = True) -> None:
         """설정 창에서 모델 폴더를 고르거나 끌 때."""

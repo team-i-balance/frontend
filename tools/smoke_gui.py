@@ -4,7 +4,8 @@ python tools/smoke_gui.py
 
 - 파일 검사: openpyxl·defusedxml이 있으면 합성 xlsx로 보호본을 만들고 저장까지 해 본다.
 - 소형 모델: onnx·onnxruntime·tokenizers가 있으면 tests/toy_model.py의 가짜 모델을 켜고 점검 창이 쓰는지 본다.
-- 서버 처리: tests/fake_backend.py의 가짜 서버로 점검 → 되돌리기 → 변환문 전송 → 답변 복원을 해 본다.
+- 서버 처리: tests/fake_backend.py의 가짜 서버로 파일 검사(업로드 → 보호본 받기 → 저장)를 한 뒤
+  점검 → 되돌리기 → 변환문 전송 → 답변 복원을 해 본다. 파일 보호본과 같은 자리표시가 복원되면 경고가 나와야 한다.
   실제 backend로 해 보려면 KPGUARD_SMOKE_SERVER=http://127.0.0.1:8000 처럼 주소를 준다 (합성 데이터만 보낸다).
 """
 import os
@@ -118,7 +119,7 @@ def files_step():
 def model_step():
     if not toy_model.deps_available():
         log.append(("소형 모델", "건너뜀: onnx·onnxruntime·tokenizers 없음"))
-        server_step()
+        server_files_step()
         return
     folder = toy_model.build(work / "toy-aegis")
     app.set_model(str(folder))
@@ -133,14 +134,43 @@ def model_step():
         w.on_cancel()
         app.set_model(enabled=False)
         log.append(("모델 끔", app.models.state))
-        server_step()
+        server_files_step()
 
     wait_for(lambda: app.models.state in ("ready", "error"), ready)
 
 
+def server_files_step():
+    app.set_server("server")
+    src = work / "상담명단.xlsx"
+    if not processor.available() or not src.exists():
+        log.append(("서버 파일 검사", "건너뜀: openpyxl·defusedxml 없음"))
+        server_step()
+        return
+    app.open_files()
+    fw = app.file_win
+    fw.inspect(src)
+
+    def done():
+        r = fw.report
+        log.append(("서버 파일 검사", r.status, r.grade, r.reason, fw.b_title.cget("text"), fw.details.cget("text"),
+                    sorted(r.server_tokens)))
+        if r.status == "READY":
+            out = work / r.suggested_name
+            log.append(("서버 보호본 저장", fw.save_to(out), out.name, out.exists()))
+        if fake and fake.uploads:
+            from tests.test_files import cell_values
+            sent = cell_values(fake.uploads[-1][1])
+            log.append(("서버로 올린 파일", fake.uploads[-1][0], sent,
+                        "메모 포함" if any("김민수" in v for v in sent) else "메모 없음"))
+        fw._close()
+        server_step()
+
+    wait_for(lambda: fw.report is not None, done)
+
+
 def server_step():
     app.set_server("server")
-    app.open_review("김민수 님 연락처는 010-1234-5678 이에요. 오로라 프로젝트 일정도 알려줘.", "sample")
+    app.open_review("김민수 님 연락처는 010-1234-5678 이에요. 오로라 프로젝트 일정도 알려줘. 오로라 예산도.", "sample")
     w = app.reviews[-1]
 
     def checked():
@@ -165,7 +195,7 @@ def server_step():
         wait_for(lambda: bool(rw.result), lambda: restored(rw))
 
     def restored(rw):
-        log.append(("서버 복원", rw.result, rw.info.cget("text")))
+        log.append(("서버 복원", rw.result, rw.banner.title.cget("text"), rw.info.cget("text")))
         app.settings_win.refresh()
         log.append(("서버 설정", app.settings_win.server_info.cget("text")))
         rw._close()

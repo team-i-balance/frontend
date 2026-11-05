@@ -153,6 +153,17 @@ def _org(text: str, base: dict) -> list[Span]:
     return out
 
 
+ORG_TYPES = frozenset({"codename", "client", "internal_host"})
+
+
+def org_spans(text: str, base: dict, ignore=frozenset()) -> list[Span]:
+    """조직 베이스(코드네임·고객사·사내 도메인)가 나온 모든 자리.
+
+    서버 처리 모드에서는 서버에 조직 베이스가 없어 이 PC에서 먼저 가린다. 같은 값이 여러 번 나오면 모두 가려야 한다.
+    """
+    return [s for s in _org(text, base) if s.value not in ignore]
+
+
 def detect_all(text: str, base: dict) -> list[Span]:
     return _names(text) + _ages(text) + _addresses(text) + _schools(text, base) + _org(text, base)
 
