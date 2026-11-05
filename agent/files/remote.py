@@ -26,7 +26,11 @@ STAGES = {
     "download": "보호본을 받는 중…",
 }
 _ERROR_REASONS = {"unreachable": "SERVER_UNREACHABLE", "expired": "FILE_NOT_AVAILABLE",
-                  "rejected": "SERVER_REJECTED", "bad_response": "SERVER_ERROR", "failed": "SERVER_ERROR"}
+                  "rejected": "SERVER_REJECTED", "bad_response": "SERVER_ERROR", "failed": "SERVER_ERROR",
+                  # 연결 보안·인증 (backend#10): 파일은 서버에 닿지 않았다
+                  "tls": "SERVER_TLS_ERROR", "untrusted_cert": "SERVER_CERT_UNTRUSTED",
+                  "pin_mismatch": "SERVER_CERT_MISMATCH", "insecure": "SERVER_INSECURE",
+                  "unauthorized": "SERVER_UNAUTHORIZED", "forbidden": "SERVER_FORBIDDEN"}
 # 요청 형식 문제 (앱과 서버 버전이 맞지 않을 때)
 _REQUEST_REASONS = frozenset({"EXPECTED_MULTIPART", "INVALID_MULTIPART", "EXPECTED_ONE_FILE"})
 

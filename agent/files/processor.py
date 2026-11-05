@@ -52,12 +52,23 @@ REASON_MESSAGES = {
     "SERVER_REJECTED": "서버가 파일 요청을 받지 않았어요. 서버 버전을 확인하세요.",
     "SERVER_ERROR": "서버에서 검사하지 못했어요.",
     "SERVER_COPY_INVALID": "서버가 보낸 보호본이 올린 사본과 맞지 않아 쓰지 않았어요. 다시 검사하세요.",
+    # 연결 보안·인증 (backend#10). 파일은 서버로 보내지 않았다
+    "SERVER_TLS_ERROR": "서버와 암호화 연결(TLS)을 맺지 못했어요. 서버 주소가 https인지, 포트가 맞는지 확인하세요.",
+    "SERVER_CERT_UNTRUSTED": "서버 인증서를 확인할 수 없어 파일을 보내지 않았어요. "
+                             "설정 창의 '인증·인증서'에서 지문을 확인하고 신뢰하세요.",
+    "SERVER_CERT_MISMATCH": "서버 인증서가 신뢰한 인증서와 달라 파일을 보내지 않았어요. "
+                            "연결을 가로채는 중일 수 있어요. 팀에 확인하세요.",
+    "SERVER_INSECURE": "암호화되지 않은 연결(HTTP)로는 토큰과 파일을 보내지 않아요. 서버 주소를 https://로 바꾸세요.",
+    "SERVER_UNAUTHORIZED": "서버가 토큰을 받지 않아 파일을 검사하지 못했어요. 설정 창의 '인증·인증서'에서 토큰을 확인하세요.",
+    "SERVER_FORBIDDEN": "이 토큰으로는 서버 파일 검사를 쓸 수 없어요 (권한 부족, 또는 개발용 토큰을 막은 서버).",
 }
 # 서버 쪽 문제라 이 PC에서 검사하면 보호본을 만들 수 있는 경우
 FALLBACK_REASONS = frozenset({"SERVER_UNSET", "SERVER_UNREACHABLE", "MODEL_UNAVAILABLE", "SERVER_RULES_ONLY",
                               "FILE_PROCESSING_BUSY",
                               "FILE_STORE_FULL", "FILE_NOT_AVAILABLE", "PROCESSING_ERROR", "PROCESSING_CANCELLED",
-                              "SERVER_REJECTED", "SERVER_ERROR", "SERVER_COPY_INVALID"})
+                              "SERVER_REJECTED", "SERVER_ERROR", "SERVER_COPY_INVALID",
+                              "SERVER_TLS_ERROR", "SERVER_CERT_UNTRUSTED", "SERVER_CERT_MISMATCH",
+                              "SERVER_INSECURE", "SERVER_UNAUTHORIZED", "SERVER_FORBIDDEN"})
 
 # 재검사에서 우리가 넣은 값 뒤에 붙은 조사만 남으면 남은 민감정보로 보지 않는다
 _JOSA = {"이", "가", "은", "는", "을", "를", "의", "도", "만", "에", "에게", "한테", "께", "께서", "와", "과",
