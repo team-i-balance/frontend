@@ -12,7 +12,7 @@ class ClientTests(unittest.TestCase):
     def test_process_decide_restore_round_trip(self):
         with FakeBackend() as fake:
             client = ServerClient(fake.url, timeout=5)
-            self.assertTrue(client.health())
+            self.assertTrue(client.health().ok)
             res = client.process("김민수 님 연락처 010-1234-5678")
             self.assertEqual((res.grade, res.confidence, res.rules_only), ("S", "high", False))
             self.assertEqual(res.masked_text, "[이름_1] 님 연락처 [전화번호_1]")
@@ -25,7 +25,8 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(ctx.exception.kind, "expired")
 
     def test_falls_back_to_rules_only_when_server_has_no_model(self):
-        with FakeBackend(model=False) as fake:
+        # /health가 탐지 범위를 알려 주지 않는 서버: 400을 받고 규칙만 모드로 다시 보낸다
+        with FakeBackend(model=False, legacy_health=True) as fake:
             client = ServerClient(fake.url, timeout=5)
             res = client.process("김민수 010-1234-5678")
             self.assertEqual((res.rules_only, res.confidence), (True, "low"))
@@ -33,6 +34,23 @@ class ClientTests(unittest.TestCase):
             self.assertFalse(client.model_available)
             client.process("두 번째 요청")
             self.assertEqual(fake.requests.count("/process"), 3)  # 400 한 번 뒤로는 바로 규칙 모드
+
+    def test_health_tells_detection_coverage_before_any_text(self):
+        with FakeBackend(model=False) as fake:
+            client = ServerClient(fake.url, timeout=5)
+            health = client.health()
+            self.assertEqual((health.ok, health.detection, health.model, health.slm), (True, "rules_only", False, False))
+            client.process("김민수 010-1234-5678")
+            self.assertEqual(fake.received, ["김민수 010-1234-5678"])  # 글을 한 번만 보낸다 (400 없이 바로 규칙만)
+            self.assertEqual(fake.requests.count("/process"), 1)
+            # 서버에 모델을 넣으면, 확인한 지 오래됐을 때 다시 물어 모델로 검사한다
+            fake.model = True
+            client.last_health.checked_at = 0
+            res = client.process("김민수 010-1234-5678")
+            self.assertEqual((res.rules_only, res.masked_text), (False, "[이름_1] [전화번호_1]"))
+        with FakeBackend(legacy_health=True) as fake:
+            client = ServerClient(fake.url, timeout=5)
+            self.assertEqual((client.health().detection, client.model_available), (None, None))
 
     def test_reasons_are_mapped_to_server_values(self):
         with FakeBackend() as fake:

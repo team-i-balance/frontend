@@ -12,7 +12,7 @@ from agent.files.remote import compare_copies, inspect_xlsx_server
 from agent.sanitize.engine import Session
 from agent.sanitize.restore import restore
 from agent.server.align import premask
-from agent.server.client import FileResult, ServerClient, ServerError
+from agent.server.client import FileResult, Health, ServerClient, ServerError
 
 from .fake_backend import FakeBackend
 from .test_files import cell_values
@@ -94,7 +94,7 @@ class FileClientTests(unittest.TestCase):
         self.assertEqual((res.status, res.reason, res.http_status), ("FAILED", "FILE_PROCESSING_BUSY", 429))
 
     def test_server_without_model_unreachable_and_odd_ids(self):
-        with FakeBackend(model=False) as fake:
+        with FakeBackend(model=False, legacy_health=True) as fake:
             client = ServerClient(fake.url, timeout=5)
             res = client.sanitize_file(self.data)
             self.assertEqual((res.status, res.reason, res.http_status), ("FAILED", "MODEL_UNAVAILABLE", 503))
@@ -113,6 +113,9 @@ class StubClient:
     def __init__(self, copy: bytes):
         self.copy = copy
         self.uploaded = None
+
+    def health(self):
+        return Health(True, "model")
 
     def sanitize_file(self, data):
         self.uploaded = data
@@ -151,7 +154,7 @@ class ServerInspectionTests(unittest.TestCase):
             self.assertEqual(fake.files, {})  # 보호본은 받는 즉시 서버에서 지워진다
         name, uploaded = fake.uploads[0]
         self.assertEqual((report.status, report.grade, report.where), ("READY", "S", "server"))
-        self.assertEqual(stages, ["local", "upload", "download"])
+        self.assertEqual(stages, ["check", "local", "upload", "download"])
         self.assertEqual(name, "upload.xlsx")
         sent = " ".join(cell_values(uploaded))
         for value in ("오로라", "한빛전자", "이지은", "010-9876-5432"):  # 조직 베이스, 숨긴 시트, 메모
@@ -183,10 +186,17 @@ class ServerInspectionTests(unittest.TestCase):
             path = self.write(xlsx([["설정"], ["api_key=sk-test-0000"]]))
             report = inspect_xlsx_server(path, BASE, self.session, ServerClient(fake.url, timeout=5))
         self.assertEqual((report.status, report.reason, report.fallback), ("BLOCKED", "SERVER_CONFIDENTIAL", False))
+        # 서버가 /health로 규칙만이라고 알려 주면 파일을 보내지 않는다 (backend#11)
         with FakeBackend(model=False) as fake:
             report = inspect_xlsx_server(self.sample(), BASE, self.session, ServerClient(fake.url, timeout=5))
-        self.assertEqual((report.status, report.reason, report.fallback), ("FAILED", "MODEL_UNAVAILABLE", True))
+        self.assertEqual((report.status, report.reason, report.fallback), ("FAILED", "SERVER_RULES_ONLY", True))
+        self.assertEqual(fake.uploads, [])
         self.assertTrue(report.message)
+        # 탐지 범위를 알려 주지 않는 서버는 올려 보고 503을 받는다
+        with FakeBackend(model=False, legacy_health=True) as fake:
+            report = inspect_xlsx_server(self.sample(), BASE, self.session, ServerClient(fake.url, timeout=5))
+        self.assertEqual((report.status, report.reason, report.fallback), ("FAILED", "MODEL_UNAVAILABLE", True))
+        self.assertEqual(len(fake.uploads), 1)
         client = ServerClient(f"http://127.0.0.1:{closed_port()}", timeout=2)
         report = inspect_xlsx_server(self.sample(), BASE, self.session, client)
         self.assertEqual((report.status, report.reason, report.fallback), ("FAILED", "SERVER_UNREACHABLE", True))

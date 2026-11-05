@@ -139,12 +139,14 @@ class SettingsWindow(tk.Toplevel):
         lines = [f"서버: {status if status in ('연결됨', '확인 전', '확인 중…') else '연결 안 됨 · ' + status}"]
         if os.environ.get("KPGUARD_SERVER_URL"):
             lines.append(f"KPGUARD_SERVER_URL 주소 사용 중: {os.environ['KPGUARD_SERVER_URL']}")
+        rules_only = False
         if server is not None and status == "연결됨":
-            lines.append({None: "서버 모델: 첫 검사 때 확인해요", True: "서버 모델: 사용 중 (모델+규칙)",
-                          False: "서버 모델: 없음 · 이름·주소 미검사"}[server.model_available])
+            line, rules_only = self._coverage(server)
+            lines.append(line)
         if server is not None and server.insecure:
             lines.append("암호화되지 않은 연결(HTTP) · 실제 개인정보는 HTTPS로 바꾼 뒤에")
-        bad = server is None or server.insecure or self.app.server_status not in ("연결됨", "확인 전", "확인 중…")
+        bad = (server is None or server.insecure or rules_only
+               or self.app.server_status not in ("연결됨", "확인 전", "확인 중…"))
         self.server_info.configure(text="\n".join(lines), fg=theme.TEXT_DANGER if bad else theme.TEXT_SECONDARY)
         models = self.app.models
         info = models.describe()
@@ -165,6 +167,19 @@ class SettingsWindow(tk.Toplevel):
             lines.append(f"\n변환 수용률  {st['acceptance'] * 100:.0f}%  (전송 {st['sent']}건 중 변환문 그대로 전송)")
         lines.append(f"매핑  {len(self.app.session.entries)}개 (메모리)")
         self.stats.configure(text="\n".join(lines))
+
+    @staticmethod
+    def _coverage(server) -> tuple[str, bool]:
+        """서버 탐지 범위 한 줄과, 규칙만인지. 서버 /health가 알려 주면 그것을, 아니면 첫 검사 결과를 쓴다."""
+        health = server.last_health
+        model = health.model if health and health.model is not None else server.model_available
+        if model is None:
+            return "서버 탐지: 첫 검사 때 확인해요", False
+        if not model:
+            return "서버 탐지: 규칙만 (이름·주소·파일 검사 안 됨)", True
+        if health and health.slm:
+            return "서버 탐지: 모델+규칙 · SLM " + ("준비됨" if health.slm_ready else "준비 중"), False
+        return "서버 탐지: 모델+규칙", False
 
     def _tick(self) -> None:
         if self.winfo_exists():

@@ -23,9 +23,10 @@ SECRET = {"API_KEY"}
 
 
 class FakeBackend:
-    def __init__(self, model: bool = True, busy: int = 0):
+    def __init__(self, model: bool = True, busy: int = 0, legacy_health: bool = False):
         self.model = model
         self.busy = busy
+        self.legacy_health = legacy_health  # backend#11 전 서버: /health가 탐지 범위를 알려 주지 않음
         self.works: dict[str, dict] = {}
         self.decisions: list[dict] = []
         self.requests: list[str] = []  # 경로만 남긴다
@@ -52,7 +53,9 @@ class FakeBackend:
                 backend.requests.append(self.path)
                 m = re.fullmatch(r"/files/([^/]+)/download", self.path)
                 if self.path == "/health":
-                    self._send(200, {"status": "ok", "detection": "model" if backend.model else "rules_only"})
+                    self._send(200, {"status": "ok"} if backend.legacy_health else
+                               {"status": "ok", "detection": "model" if backend.model else "rules_only",
+                                "slm": False, "slm_ready": False})
                 elif m:
                     data = backend.files.pop(m.group(1), None)
                     if data is None:

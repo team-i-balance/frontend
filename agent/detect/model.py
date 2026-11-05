@@ -51,13 +51,23 @@ RAW_LABELS_KO = {  # 표시 순서도 이 순서 (성·이름)
     "IP_ADDRESS": "IP 주소", "PASSWORD": "비밀번호", "ACCOUNTNUM": "계좌번호",
 }
 
-# 모델이 이름·주소 뒤의 조사까지 잡는 경우가 있다 ("김민수의"). 받침에 맞는 조사만 떼어낸다.
-# 이름·주소 끝 글자로 흔한 것(나·로·랑·야·아·도·만: 유나, 세로, 사랑, 민아, 테헤란로…)은 떼지 않는다.
-# 잘못 떼면 이름 한 글자가 그대로 나가고, 못 떼면 조사가 함께 바뀔 뿐이라 덜 떼는 쪽을 고른다.
+# 모델이 이름·주소 뒤의 조사까지 잡는 경우가 있다 ("김민수의"). 팀 서버와 같은 규칙으로 뗀다
+# (backend local_ai `_trim_korean_particle`, backend#12 · PR #19). 잘못 떼면 이름 한 글자가 그대로 나가고,
+# 못 떼면 조사가 함께 바뀔 뿐이라 덜 떼는 쪽을 고른다.
+# - 받침에 맞는 조사만: 받침이 있으면 은/을/과/이/으로…, 없으면 는/를/와/가
+# - 이름·주소 끝 글자로 흔한 것(나·로·랑·야·아·도·만: 유나, 세로, 사랑, 민아, 테헤란로…)은 조사로 보지 않는다
+# - 한 글자 조사는 남는 값이 한글 세 글자 이상일 때, 두 글자 이상 조사는 두 글자 이상일 때만 뗀다
+# - 이름 끝 '이'·'가'는 이름 마지막 글자일 수 있어("김다솜이", "박지훈이") 남는 값이 네 글자 이상일 때만 뗀다
+# - 복성 + 한 글자 이름 + 한 글자("남궁민이")는 떼지 않는다
+# - 모델 구간 바로 뒤가 한글이면(낱말 중간에서 끊김) 떼지 않는다
+# 서버보다 더 보는 것: 에·처럼·보다·하고·이에요·이랑, 겹친 조사("김민수님께서" → 께서, 님). 이름 끝 글자로 쓰이지 않는 것들이다.
 _JOSA_BATCHIM = ("이에요", "이랑", "으로", "은", "을", "과", "이")
 _JOSA_OPEN = ("는", "를", "와", "가")
-_JOSA_ANY = ("에게서", "한테서", "께서", "에게", "한테", "에서", "까지", "부터", "처럼", "보다", "하고",
-             "님", "씨", "의", "께", "에")
+_JOSA_ANY = ("으로부터", "에게서", "한테서", "께서는", "에게", "한테", "께서", "에서", "까지", "부터", "처럼", "보다", "하고",
+             "님께", "님", "씨", "의", "께", "에")
+_JOSA_ALL = sorted(_JOSA_BATCHIM + _JOSA_OPEN + _JOSA_ANY, key=len, reverse=True)
+_JOSA_AMBIGUOUS = frozenset({"이", "가"})
+_COMPOUND_SURNAMES = ("남궁", "황보", "선우", "제갈", "사공", "서문", "독고", "동방")
 _TRIM_TYPES = {"name", "address"}
 
 
@@ -145,15 +155,28 @@ def merge_windows(spans: list[dict]) -> list[dict]:
     return sorted(out, key=lambda s: (s["start"], s["end"]))
 
 
-def trim_josa(text: str, start: int, end: int) -> int:
-    """이름·주소 끝에 붙은 조사를 떼어낸 새 end. 남는 값이 두 글자 미만이면 그대로 둔다."""
-    for _ in range(2):  # "민수님께서" → "님" + "께서"
+def _hangul(ch: str) -> bool:
+    return "가" <= ch <= "힣"
+
+
+def trim_josa(text: str, start: int, end: int, kind: str = "name") -> int:
+    """이름·주소(kind: name / address) 끝에 붙은 조사를 떼어낸 새 end. 규칙은 위 _JOSA_* 설명."""
+    if end < len(text) and _hangul(text[end]):
+        return end  # 모델이 낱말 중간에서 끊었다 ("김민수의번호")
+    for _ in range(2):  # "김민수님께서" → "께서", "님"
         value = text[start:end]
-        for josa in sorted(_JOSA_BATCHIM + _JOSA_OPEN + _JOSA_ANY, key=len, reverse=True):
-            if not value.endswith(josa) or len(value) - len(josa) < 2:
+        for josa in _JOSA_ALL:
+            if not value.endswith(josa):
                 continue
             stem = value[: -len(josa)]
-            if not ("가" <= stem[-1] <= "힣" or stem[-1].isdigit()):
+            if not stem or not (_hangul(stem[-1]) or stem[-1].isdigit()):
+                continue
+            hangul = sum(map(_hangul, stem))
+            if hangul < (3 if len(josa) == 1 else 2):
+                continue
+            if kind == "name" and len(josa) == 1 and (
+                    (len(value) == 4 and value.startswith(_COMPOUND_SURNAMES))
+                    or (josa in _JOSA_AMBIGUOUS and hangul < 4)):
                 continue
             batchim = final_sound(stem)[0]
             if josa in _JOSA_BATCHIM and not batchim:
@@ -176,7 +199,7 @@ def to_spans(text: str, raw_spans: list[dict]) -> list[Span]:
         while end > start and text[end - 1].isspace():
             end -= 1
         if r["type"] in _TRIM_TYPES:
-            end = trim_josa(text, start, end)
+            end = trim_josa(text, start, end, r["type"])
         if end <= start:
             continue
         conf = min(sum(r["probs"]) / len(r["probs"]), MAX_CONFIDENCE)

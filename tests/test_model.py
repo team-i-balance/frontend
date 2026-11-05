@@ -58,19 +58,33 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual([(s["start"], s["end"]) for s in merged], [(0, 13)])
 
     def test_josa_trimming_keeps_name_endings(self):
-        cases = {"김민수의": "김민수", "김민준이": "김민준", "이민호가": "이민호", "민수님께서": "민수", "강남구에": "강남구",
-                 "김유나": "김유나", "김사랑": "김사랑", "테헤란로": "테헤란로", "김지이": "김지이", "김하은": "김하은",
-                 "민아": "민아"}
+        cases = {"김민수의": "김민수", "김민수님께서": "김민수", "민수님께서": "민수님", "김유나": "김유나",
+                 "김사랑": "김사랑", "테헤란로": "테헤란로", "김지이": "김지이", "김하은": "김하은", "민아": "민아",
+                 "이지은의": "이지은",
+                 # '이'·'가'는 세 글자 이름 끝 글자일 수 있어 떼지 않는다 (팀 서버와 같은 규칙)
+                 "김민준이": "김민준이", "이민호가": "이민호가"}
         for value, expected in cases.items():
             with self.subTest(value=value):
                 self.assertEqual(value[:m.trim_josa(value, 0, len(value))], expected)
+        for value, expected in {"강남구에": "강남구", "테헤란로 123에서": "테헤란로 123", "서울에": "서울에"}.items():
+            with self.subTest(value=value):
+                self.assertEqual(value[:m.trim_josa(value, 0, len(value), "address")], expected)
+
+    def test_josa_trimming_matches_team_server(self):
+        """backend tests/test_korean_particles.py (backend#12, PR #19)의 사례를 그대로 쓴다."""
+        cases = [("김민수의", "name", "김민수"), ("김민수에게", "name", "김민수"), ("박지훈이", "name", "박지훈이"),
+                 ("김민수가", "name", "김민수가"), ("서울시 강남구의", "address", "서울시 강남구"),
+                 ("신유나", "name", "신유나"), ("박세로", "name", "박세로"), ("오사랑", "name", "오사랑"),
+                 ("김민아", "name", "김민아"), ("테헤란로", "address", "테헤란로"), ("김민이", "name", "김민이"),
+                 ("남궁민이", "name", "남궁민이"), ("김다솜이", "name", "김다솜이"), ("이순재가", "name", "이순재가"),
+                 ("홍길동민이", "name", "홍길동민"), ("김철수환이", "name", "김철수환")]
+        for value, kind, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(value[:m.trim_josa(value, 0, len(value), kind)], expected)
+        self.assertEqual(m.trim_josa("김민수의번호", 0, 4), 4)  # 낱말 중간에서 끊긴 구간은 그대로
 
 
 class LoadingTests(unittest.TestCase):
-    def test_onnxruntime_telemetry_is_disabled_before_import(self):
-        import os
-        self.assertEqual(os.environ.get("ORT_DISABLE_TELEMETRY"), "1")
-
     def test_missing_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ModelUnavailable):

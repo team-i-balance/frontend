@@ -20,6 +20,7 @@ from .processor import (FALLBACK_REASONS, MAX_FILE_BYTES, REASON_MESSAGES, FileR
                         suggested_name)
 
 STAGES = {
+    "check": "팀 서버 연결과 탐지 범위를 확인하는 중…",
     "local": "이 PC에서 조직 베이스·기밀 표기를 확인하는 중…",
     "upload": "팀 서버에서 검사하는 중… 칸이 많으면 시간이 걸릴 수 있어요",
     "download": "보호본을 받는 중…",
@@ -99,6 +100,18 @@ def inspect_xlsx_server(path, base: dict, session, server, *, ignore=frozenset()
     if not available():
         return _failed("DEPENDENCY_MISSING")
     from .xlsx.sanitizer import Summary, sanitize_xlsx
+
+    # 서버가 처리하지 못할 파일은 보내지 않는다: 서버 파일 검사는 모델이 있어야 하고(없으면 503),
+    # 서버는 그 답을 하기 전에 파일을 끝까지 받는다. /health가 탐지 범위를 알려 준다 (backend#11).
+    say("check")
+    try:
+        health = server.health()
+    except ServerError as exc:
+        return _failed(_ERROR_REASONS.get(exc.kind, "SERVER_ERROR"))
+    if not health.ok:
+        return _failed("SERVER_ERROR")
+    if health.model is False:
+        return _failed("SERVER_RULES_ONLY")
 
     try:
         if path.stat().st_size > MAX_FILE_BYTES:

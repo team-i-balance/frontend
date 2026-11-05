@@ -160,8 +160,8 @@ class App:
         self.server_status = "확인 중…"
 
         def work():
-            try:
-                status = "연결됨" if server.health() else "응답이 이상해요"
+            try:  # 탐지 범위(모델+규칙 / 규칙만, SLM 준비)도 함께 받아 둔다 → server.last_health
+                status = "연결됨" if server.health().ok else "응답이 이상해요"
             except ServerError as exc:
                 status = exc.message
             self.post("server_health", status)

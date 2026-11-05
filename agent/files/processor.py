@@ -43,6 +43,7 @@ REASON_MESSAGES = {
     "SERVER_UNSET": "서버 주소가 설정돼 있지 않아요. 설정 창에서 지정하거나 이 PC에서 검사하세요.",
     "SERVER_UNREACHABLE": "서버에 연결하지 못했어요. 서버 주소와 네트워크를 확인하세요.",
     "MODEL_UNAVAILABLE": "서버에 탐지 모델이 없어 파일을 검사할 수 없어요 (서버 파일 검사는 모델이 있어야 해요).",
+    "SERVER_RULES_ONLY": "서버에 탐지 모델이 없어(규칙만) 파일을 서버로 보내지 않았어요. 이 PC에서 검사하세요.",
     "FILE_PROCESSING_BUSY": "서버가 다른 파일을 처리하고 있어요. 잠시 후 다시 시도하세요.",
     "FILE_STORE_FULL": "서버 보관 공간이 가득 찼어요. 10분쯤 지나 다시 시도하세요.",
     "FILE_NOT_AVAILABLE": "서버에서 보호본을 받지 못했어요. 이미 받았거나 10분이 지나 지워졌어요. 다시 검사하세요.",
@@ -53,7 +54,8 @@ REASON_MESSAGES = {
     "SERVER_COPY_INVALID": "서버가 보낸 보호본이 올린 사본과 맞지 않아 쓰지 않았어요. 다시 검사하세요.",
 }
 # 서버 쪽 문제라 이 PC에서 검사하면 보호본을 만들 수 있는 경우
-FALLBACK_REASONS = frozenset({"SERVER_UNSET", "SERVER_UNREACHABLE", "MODEL_UNAVAILABLE", "FILE_PROCESSING_BUSY",
+FALLBACK_REASONS = frozenset({"SERVER_UNSET", "SERVER_UNREACHABLE", "MODEL_UNAVAILABLE", "SERVER_RULES_ONLY",
+                              "FILE_PROCESSING_BUSY",
                               "FILE_STORE_FULL", "FILE_NOT_AVAILABLE", "PROCESSING_ERROR", "PROCESSING_CANCELLED",
                               "SERVER_REJECTED", "SERVER_ERROR", "SERVER_COPY_INVALID"})
 

@@ -4,9 +4,16 @@
 """
 from __future__ import annotations
 
-import argparse
-import ctypes
-import sys
+import os
+
+# 외부 연결 없음: onnxruntime의 마이크로소프트 원격 수집은 onnxruntime을 불러오기 전에 이 값이 있어야 꺼진다
+# (backend#13). agent/detect/model.py도 넣지만, 진입점에서 먼저 넣어 어느 모듈이 먼저 불러와도 꺼지게 한다.
+# 이미 지정한 값은 덮어쓰지 않는다 (팀 서버와 같은 방식).
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+
+import argparse  # noqa: E402
+import ctypes  # noqa: E402
+import sys  # noqa: E402
 
 
 def _dpi_aware() -> None:

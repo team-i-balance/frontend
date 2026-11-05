@@ -31,6 +31,7 @@ UPLOAD_NAME = "upload.xlsx"         # 원래 파일 이름에도 개인정보가
 FILE_TIMEOUT = 300.0                # 서버는 요청 안에서 칸마다 모델을 돌린다. 칸이 많으면 오래 걸린다
 MAX_DOWNLOAD = 32 * 1024 * 1024     # 보호본은 값만 남긴 사본이라 올린 파일(최대 8MB)보다 크지 않다
 BUSY_RETRIES = 5                    # 429 FILE_PROCESSING_BUSY: 서버는 파일을 한 번에 하나만 처리한다
+HEALTH_RECHECK_SECONDS = 300        # 서버에 모델이 없다고 안 뒤로, 이만큼 지나면 /health로 다시 확인한다
 _WORK_ID = re.compile(r"[0-9A-Za-z_-]{1,64}")
 
 # 앱의 사유 → 서버 사유 (서버에는 false_positive / business_need 두 가지뿐)
@@ -46,6 +47,20 @@ class ServerError(Exception):
         self.message = message
         self.kind = kind
         self.status = status
+
+
+@dataclass
+class Health:
+    """/health. 탐지 범위는 backend#11 뒤로 알려 준다 (그 전 서버는 status만 준다)."""
+    ok: bool
+    detection: str | None = None   # model(모델+규칙) / rules_only(규칙만) / None(서버가 알려 주지 않음)
+    slm: bool = False              # 기밀 탐지 SLM이 설정됨
+    slm_ready: bool = False        # SLM 예열이 끝남 (배포 직후에는 잠깐 false)
+    checked_at: float = field(default_factory=time.time)
+
+    @property
+    def model(self) -> bool | None:
+        return None if self.detection is None else self.detection == "model"
 
 
 @dataclass
@@ -138,6 +153,7 @@ class ServerClient:
         self.base_url = url
         self.timeout = timeout
         self.model_available: bool | None = None  # 모름 / 서버에 모델 있음 / 없음(규칙만)
+        self.last_health: Health | None = None
 
     @property
     def insecure(self) -> bool:
@@ -176,11 +192,26 @@ class ServerClient:
         return out
 
     # ------------------------------------------------------------------ API
-    def health(self) -> bool:
+    def health(self) -> Health:
+        """원문 없이 연결과 탐지 범위를 확인한다. 범위를 알려 주면 그에 맞춰 규칙만 모드를 정한다."""
         data = self._request("GET", "/health", timeout=min(self.timeout, 5.0))
-        return isinstance(data, dict) and data.get("status") == "ok"
+        if not isinstance(data, dict):
+            raise ServerError("서버 응답 형식이 달라요.", "bad_response")
+        detection = data.get("detection") if data.get("detection") in ("model", "rules_only") else None
+        health = Health(data.get("status") == "ok", detection, data.get("slm") is True, data.get("slm_ready") is True)
+        self.last_health = health
+        if health.ok and health.model is not None:
+            self.model_available = health.model
+        return health
 
     def process(self, text: str) -> ProcessResult:
+        """서버에 모델이 없다고 알고 있으면 처음부터 규칙만 모드로 보낸다 (글을 두 번 보내지 않게)."""
+        stale = self.last_health is None or time.time() - self.last_health.checked_at > HEALTH_RECHECK_SECONDS
+        if self.model_available is False and stale:
+            try:  # 그 사이 서버에 모델을 넣었을 수 있다
+                self.health()
+            except ServerError:
+                pass
         rules_only = self.model_available is False
         try:
             data = self._request("POST", "/process", {"text": text, "rules_only": rules_only})
