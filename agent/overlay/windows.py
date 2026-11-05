@@ -5,9 +5,9 @@ import ntpath
 import os
 from collections import deque
 from ctypes import wintypes as W
-from functools import lru_cache
 
 import uiautomation as u
+from comtypes.client import CreateObject, GetModule
 
 from ..server.client import MAX_TEXT
 from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site, terminal_draft
@@ -43,7 +43,6 @@ BROWSERS = {
 TERMINALS = {"windowsterminal.exe", "openconsole.exe", "conhost.exe"}
 
 
-@lru_cache(maxsize=32)
 def executable(pid):
     handle = open_process(0x1000, False, pid)
     if handle:
@@ -102,7 +101,10 @@ def address_bar(hwnd):
 
 
 def is_editor(field):
-    if field.ControlTypeName != "EditControl" or field.IsPassword or not field.IsEnabled:
+    role = field.ControlTypeName
+    if role != "EditControl" and field.GetPropertyValue(u.PropertyId.AriaRoleProperty) != "textbox":
+        return False
+    if field.IsPassword or field.IsOffscreen or not field.IsEnabled:
         return False
     value = field.GetPattern(u.PatternId.ValuePattern)
     if value and value.IsReadOnly:
@@ -157,6 +159,15 @@ class Reader:
         self.com = u.UIAutomationInitializerInThread()
         self.saved = None
         self.bar = (None, None)
+        automation = CreateObject(
+            "{ff48dba4-60ef-4201-aa87-54103eef594e}",
+            interface=GetModule("UIAutomationCore.dll").IUIAutomation,
+        )
+        self.editables = automation.CreateOrCondition(
+            automation.CreatePropertyCondition(u.PropertyId.ControlTypeProperty, u.ControlType.EditControl),
+            automation.CreatePropertyCondition(u.PropertyId.AriaRoleProperty, "textbox"),
+        )
+        self.reason = "foreground"
         return self
 
     def __exit__(self, *args):
@@ -168,7 +179,7 @@ class Reader:
 
     def location(self, doc, hwnd, use_bar):
         url = document_url(doc)
-        if url or not use_bar:
+        if "://" in url or url.startswith(("about:", "chrome:", "edge:")) or not use_bar:
             return url
         if hwnd != self.bar[0] or self.bar[1] is None:
             self.bar = hwnd, address_bar(hwnd)
@@ -180,7 +191,39 @@ class Reader:
             return url
         return ""
 
+    def page_under_window(self, hwnd):
+        bounds = W.RECT()
+        api(user, "GetWindowRect", W.BOOL, W.HWND, C.POINTER(W.RECT))(hwnd, C.byref(bounds))
+        x = (bounds.left + bounds.right) // 2
+        for fraction in (0.60, 0.83, 0.40):
+            y = int(bounds.top + fraction * (bounds.bottom - bounds.top))
+            hit = u.ControlFromPoint(x, y)
+            if hit:
+                top = hit.GetTopLevelControl()
+                if top and top.NativeWindowHandle == hwnd:
+                    chain = list(ancestry(hit))
+                    if any(n.ControlTypeName == "DocumentControl" for n in chain):
+                        return chain
+        return []
+
+    def find_editor(self, doc):
+        # Providers may leave focus on the web document or a text child during IME / DOM updates.
+        # Filter on the provider side, then require the editor to belong to this exact document.
+        found = doc.Element.FindAll(4, self.editables)
+        matches = []
+        for i in range(min(found.Length, 50)):
+            field = u.Control.CreateControlFromElement(found.GetElement(i))
+            if is_editor(field):
+                owner = next(
+                    (n for n in ancestry(field.GetParentControl()) if n.ControlTypeName == "DocumentControl"),
+                    None,
+                )
+                if owner and owner.GetRuntimeId() == doc.GetRuntimeId():
+                    matches.append(field)
+        return matches[0] if len(matches) == 1 else None
+
     def sample(self):
+        self.reason = "foreground"
         hwnd, pid = foreground(), W.DWORD()
         if not hwnd:
             return None
@@ -189,14 +232,10 @@ class Reader:
             return OWN_WINDOW
         exe = executable(pid.value)
         if exe not in BROWSERS | TERMINALS:
-            self.reset()
             return None
         focused = u.GetFocusedControl()
         top = focused.GetTopLevelControl() if focused else None
-        if not top or top.NativeWindowHandle != hwnd:
-            self.reset()
-            return None
-        lineage = list(ancestry(focused))
+        lineage = list(ancestry(focused)) if top and top.NativeWindowHandle == hwnd else []
         if exe in TERMINALS:
             self.reset()
             for field in lineage:
@@ -217,34 +256,37 @@ class Reader:
             return None
 
         docs = [n for n in lineage if n.ControlTypeName == "DocumentControl"]
-        doc = docs[0] if docs else None
-        candidate = next((n for n in lineage[: lineage.index(doc)] if is_editor(n)), None) if doc else None
-        if candidate:
-            # A prompt embedded in a different top-level website is outside the monitoring scope.
-            urls = [self.location(d, hwnd, len(docs) == 1) for d in docs]
-            if not all(site(url) and site(url) == site(urls[0]) for url in urls):
-                self.reset()
-                return None
-            self.saved = hwnd, urls[0], candidate, doc, len(docs) == 1
-        if not self.saved or self.saved[0] != hwnd:
+        # After clicking page chrome the focused UIA element often belongs to the address bar.
+        # Resolve the page under the foreground window and keep scanning its original composer.
+        if not docs:
+            lineage = self.page_under_window(hwnd)
+            docs = [n for n in lineage if n.ControlTypeName == "DocumentControl"]
+        self.reason = "web-document"
+        if not docs:
+            return None
+        doc = docs[0]
+        urls = [self.location(d, hwnd, len(docs) == 1) for d in docs]
+        self.reason = "verified-origin"
+        if not all(site(url) and site(url) == site(urls[0]) for url in urls):
             self.reset()
             return None
-        _, url, field, owner, use_bar = self.saved
-        if (
-            field.IsOffscreen
-            or owner.IsOffscreen
-            or self.location(owner, hwnd, use_bar) != url
-            or (doc and doc.GetRuntimeId() != owner.GetRuntimeId())
-        ):
+        url = urls[0]
+        doc_id = tuple(doc.GetRuntimeId())
+        candidate = next((n for n in lineage[: lineage.index(doc)] if is_editor(n)), None)
+        cache_key = hwnd, url, doc_id
+        if candidate is None and self.saved and self.saved[0] == cache_key:
+            previous = self.saved[1]
+            if not previous.IsOffscreen:
+                candidate = previous
+        if candidate is None:
+            candidate = self.find_editor(doc)
+        self.reason = "prompt-editor"
+        if candidate is None:
             self.reset()
             return None
-        if not candidate and not doc:
-            # Focus moved to browser chrome; check which document is actually under the cached field.
-            r = field.BoundingRectangle
-            hit = u.ControlFromPoint(r.left + 2, r.ycenter())
-            if not any(n.GetRuntimeId() == owner.GetRuntimeId() for n in ancestry(hit)):
-                self.reset()
-                return None
+        self.saved = cache_key, candidate
+        field, owner = candidate, doc
+        self.reason = "prompt-text-range"
         view = editor_range(field, owner)
         if view:
             raw = view.GetText(MAX_TEXT + 1)

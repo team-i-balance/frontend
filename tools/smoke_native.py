@@ -55,7 +55,7 @@ def main():
                     return
                 time.sleep(0.01)
             raise AssertionError(
-                f"{description} ({overlay.status}, revisions={len(app.revisions)}, marks={len(overlay.shown.marks)})"
+                f"{description} on {host} ({overlay.status}, stage={overlay.stage}, revisions={len(app.revisions)}, marks={len(overlay.shown.marks)})"
             )
 
         try:
@@ -84,6 +84,7 @@ def main():
             ctx.route("**/*", fixture)
             page = ctx.new_page()
             for host in documents:
+                print(f"testing native browser: {host}", flush=True)
                 page.goto(f"https://{host}/test")
                 page.bring_to_front()
                 field = page.locator("textarea,[contenteditable]")
@@ -103,7 +104,10 @@ def main():
                     time.sleep(0.3)
                     assert len(app.revisions) == before, "unrelated origin reached the detector"
                     break
-                until(lambda: len(app.revisions) > before, "direct typing reached preview")
+                until(
+                    lambda: any("sample" in revision for revision in app.revisions[before:]),
+                    "direct typing reached preview",
+                )
                 page.keyboard.type(PHONE_TEXT)
                 until(
                     lambda: overlay.shown.marks and PHONE_TEXT in overlay.shown.text,

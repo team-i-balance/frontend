@@ -49,20 +49,14 @@ def ax_range(start, length):
 
 
 def rect(frame):
-    return (
-        round(frame.origin.x),
-        round(frame.origin.y),
-        round(frame.origin.x + frame.size.width),
-        round(frame.origin.y + frame.size.height),
-    )
+    (x, y), (width, height) = frame
+    return round(x), round(y), round(x + width), round(y + height)
 
 
 def boundary(element):
     pos = unpack(attribute(element, "AXPosition"), A.kAXValueCGPointType)
     size = unpack(attribute(element, "AXSize"), A.kAXValueCGSizeType)
-    if pos is not None and size is not None:
-        return round(pos.x), round(pos.y), round(pos.x + size.width), round(pos.y + size.height)
-    return 0, 0, 0, 0
+    return rect((pos, size)) if pos is not None and size is not None else (0, 0, 0, 0)
 
 
 def ancestors(field):
@@ -107,9 +101,9 @@ def boxes(field, start, end):
     line = parameter(field, "AXLineForIndex", start)
     while line is not None and start < end:
         extent = unpack(parameter(field, "AXRangeForLine", line), A.kAXValueCFRangeType)
-        if extent is None or not extent.location <= start < extent.location + extent.length:
+        if extent is None or not extent[0] <= start < extent[0] + extent[1]:
             break
-        stop = min(end, extent.location + extent.length)
+        stop = min(end, extent[0] + extent[1])
         region = bounds(start, stop)
         if region:
             yield region
@@ -183,14 +177,14 @@ class Reader:
             if field is None:
                 return None
             visible = unpack(attribute(field, "AXVisibleCharacterRange"), A.kAXValueCFRangeType)
-            if visible is None or not 0 < visible.length <= 100_000:
+            if visible is None or not 0 < visible[1] <= 100_000:
                 return None
-            raw = parameter(field, "AXStringForRange", ax_range(visible.location, visible.length))
+            raw = parameter(field, "AXStringForRange", ax_range(visible[0], visible[1]))
             if not isinstance(raw, str):
                 return None
             draft = terminal_draft(raw, attribute(window, "AXTitle") or "")
             if draft is not None:
-                return self.snapshot(pid, "cli", window, field, raw, visible.location, draft)
+                return self.snapshot(pid, "cli", window, field, raw, visible[0], draft)
             return None
 
         docs = [n for n, role in chain if role == "AXWebArea"]
@@ -215,7 +209,7 @@ class Reader:
             return None
         if not docs:
             # A toolbar click may also mean a tab switched. Hit-test the cached editor in the front window.
-            x, y, r, b = boundary(field)
+            x, y, _, b = boundary(field)
             error, hit = A.AXUIElementCopyElementAtPosition(self.app, x + 2, (y + b) / 2, None)
             if error or not any(n == doc for n in ancestors(hit)):
                 self.reset()

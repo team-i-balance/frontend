@@ -186,4 +186,4 @@ class NativePlatformTests(unittest.TestCase):
         offsets = m.utf16_offsets("한🧪글")
         self.assertEqual(offsets, [0, 1, 3, 4])
         extent = m.unpack(m.ax_range(offsets[2], 1), m.A.kAXValueCFRangeType)
-        self.assertEqual((extent.location, extent.length), (3, 1))
+        self.assertEqual(tuple(extent), (3, 1))

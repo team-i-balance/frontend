@@ -51,6 +51,7 @@ class NativeOverlay:
         self.live = LiveRanges(self._preview)
         self.frame = self.shown = Frame()
         self.chip = None
+        self.stage = "initializing"
         self.pressed = False
         self.press_at = None
         self.paint = None
@@ -112,6 +113,7 @@ class NativeOverlay:
             self.status = "꺼짐"
             return 0.15
         source = reader.sample()
+        self.stage = getattr(reader, "reason", "accessibility")
         if source is OWN_WINDOW and self.chip is not None:
             return 0.05
         if source is None or source is OWN_WINDOW:
