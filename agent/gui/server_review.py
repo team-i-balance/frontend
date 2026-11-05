@@ -24,7 +24,9 @@ from ..server.client import AUTH_KINDS, CERT_KINDS, NOT_PROCESSED, ServerError
 from ..system import platform_api
 from . import theme
 from .restore_window import build_restore_layout
-from .review import MISSED_TYPES, REASON_SHORT, REASONS, ReasonDialog, Tooltip, _short, build_layout, shape_of
+from ..sanitize.josa import ro
+from .chip import Chip, ChipPanel
+from .review import MISSED_TYPES, REASON_SHORT, REASONS, Tooltip, _short, build_layout, shape_of
 
 SERVER_COLUMNS = (("type", "유형", 120), ("orig", "원문", 180), ("repl", "보낼 값", 170),
                   ("state", "상태", 190), ("why", "탐지", 330))
@@ -59,9 +61,10 @@ class ServerReviewWindow(tk.Toplevel):
         self._q: queue.Queue = queue.Queue()
         self._job = None
         self._pending_click = None
+        self.chip = None
         self.tip = Tooltip(self)
 
-        theme.window(self, "AI 전송 전 점검 (서버) — KP Guard", 1200, 840, 900, 640)
+        theme.window(self, f"AI 전송 전 점검 (서버) — {theme.APP_TITLE}", 1200, 840, 900, 640)
         self.protocol("WM_DELETE_WINDOW", self.on_cancel)
         self._build()
         if text:
@@ -86,9 +89,11 @@ class ServerReviewWindow(tk.Toplevel):
         self.btn_send = theme.Button(self.bottom, "변환문 복사", self.on_send, kind="primary")
         self.btn_send.pack(side="right")
         theme.Button(self.bottom, "취소", self.on_cancel).pack(side="right", padx=theme.px(8))
-        theme.Button(self.bottom, "원문 그대로 사용", self.on_original, kind="ghost").pack(side="right")
+        self.btn_original = theme.Button(self.bottom, "원문 그대로 사용", self.on_original, kind="ghost")
+        self.btn_original.pack(side="right")
         self.bind("<Control-Return>", lambda e: self.on_send())
-        self.bind("<Escape>", lambda e: self.on_cancel())
+        self.bind("<Escape>", lambda e: self._close_chip() if self.chip else self.on_cancel())
+        self.bind("<ButtonPress>", self._close_chip, add="+")  # 칩 밖을 누르면 칩만 닫는다
 
     def _bring_front(self) -> None:
         self.deiconify()
@@ -319,9 +324,9 @@ class ServerReviewWindow(tk.Toplevel):
             if not it.exact:
                 state, value, tag = "위치 불명 · 되돌릴 수 없음", "(원문 위치를 확정하지 못함)", ""
             elif it.token in self.reverted:
-                state, value, tag = f"되돌림 · {REASON_SHORT[self.reverted[it.token]]}", theme.masked(it.value), "muted"
+                state, value, tag = f"원문유지 · {REASON_SHORT[self.reverted[it.token]]}", theme.masked(it.value), "muted"
             else:
-                state, value, tag = "적용", theme.masked(it.value), ""
+                state, value, tag = "마스킹", theme.masked(it.value), ""
             repl = "(원문 유지)" if it.token in self.reverted else it.token
             why = "서버 탐지 · " + ("규칙" if self.result and self.result.rules_only else "모델+규칙")
             rows.append((("t", it.token), it.label, value, repl, state, why, tag))
@@ -329,15 +334,15 @@ class ServerReviewWindow(tk.Toplevel):
             reverted = s.value in self.org_reverted
             rows.append((("o", s.value), TYPE_LABELS[s.type], theme.masked(s.value),
                          "(원문 유지)" if reverted else self.app.session.tag_for(s.type, s.value),
-                         f"되돌림 · {REASON_SHORT[self.org_reverted[s.value]]}" if reverted else "적용 (서버로 안 보냄)",
+                         f"원문유지 · {REASON_SHORT[self.org_reverted[s.value]]}" if reverted else "마스킹 (서버로 안 보냄)",
                          s.reason, "muted" if reverted else ""))
         for i, (typ, value) in enumerate(self.manual):
-            rows.append((("m", i), TYPE_LABELS.get(typ, "기타"), theme.masked(value), "[가림]", "적용 (직접 신고)",
+            rows.append((("m", i), TYPE_LABELS.get(typ, "기타"), theme.masked(value), "[가림]", "마스킹 (직접 신고)",
                          "사용자가 직접 지정", ""))
         for i, b in enumerate(self.blockers):
             released = b.key in self.released
             rows.append((("b", i), TYPE_LABELS[b.type], b.value, "—",
-                         f"차단 해제 · {REASON_SHORT[self.released[b.key]]}" if released else "차단",
+                         f"원문유지 · {REASON_SHORT[self.released[b.key]]}" if released else "차단",
                          b.reason, "muted" if released else "danger"))
         return rows
 
@@ -396,7 +401,7 @@ class ServerReviewWindow(tk.Toplevel):
             if org:
                 lines.append(f"• 조직 베이스(코드네임·고객사·사내 도메인) {len(org)}건은 서버로 보내기 전에 이 PC에서 가렸어요.")
             if self.reverted or self.org_reverted:
-                lines.append(f"• 되돌린 항목 {len(self.reverted) + len(self.org_reverted)}건은 원문 그대로 나가요.")
+                lines.append(f"• 원문유지한 항목 {len(self.reverted) + len(self.org_reverted)}건은 원문 그대로 나가요.")
             unsure = len({it.token for it in self.items if not it.exact})
             if unsure:
                 lines.append(f"• 원문 위치를 확정하지 못한 항목 {unsure}건은 되돌릴 수 없어요 (가린 채로 보내요).")
@@ -417,13 +422,14 @@ class ServerReviewWindow(tk.Toplevel):
             it = next((i for i in self.items if i.token == ref), None)
             if it is None:
                 return ref
-            state = "되돌림" if ref in self.reverted else "적용"
-            return f"{it.label} · {state}\n서버 탐지 → {ref}\n클릭해서 되돌리기"
+            state = "원문유지" if ref in self.reverted else "마스킹"
+            return f"{it.label} · {state}\n서버 탐지 → {ref}\n눌러서 마스킹 · 원문유지"
         if kind == "o":
-            return f"조직 베이스 · {'되돌림' if ref in self.org_reverted else '적용'}\n서버로 보내기 전에 이 PC에서 가림\n클릭해서 되돌리기"
+            return (f"조직 베이스 · {'원문유지' if ref in self.org_reverted else '마스킹'}\n"
+                    "서버로 보내기 전에 이 PC에서 가림\n눌러서 마스킹 · 원문유지")
         if kind == "b":
-            return f"기밀 · {self.blockers[ref].reason}\n클릭해서 빼고 보내기·차단 해제"
-        return "직접 신고한 값\n클릭해서 신고 취소"
+            return f"기밀 · {self.blockers[ref].reason}\n눌러서 빼고 보내기 · 원문유지"
+        return "직접 신고한 값\n눌러서 마스킹 · 원문유지(신고 취소)"
 
     def _show_tip(self, event, key) -> None:
         self.tip.show(event.x_root, event.y_root, self._describe(key))
@@ -447,54 +453,130 @@ class ServerReviewWindow(tk.Toplevel):
         if row and row in self._row_keys:
             self._open_menu(self._row_keys[row], event.x_root, event.y_root)
 
-    def _reason_menu(self, parent: tk.Menu, apply) -> tk.Menu:
-        sub = theme.menu(parent)
-        for code, label in REASONS:
-            sub.add_command(label=label, command=lambda c=code: apply(c))
-        return sub
+    # ------------------------------------------------------------------ 칩: 마스킹 / 원문유지
+    def _close_chip(self, _e=None) -> None:
+        if self.chip is not None:
+            self.chip.destroy()
+            self.chip = None
+
+    def _chip_at(self, x: int, y: int) -> ChipPanel:
+        self._close_chip()
+        bounds = (0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+        self.chip = ChipPanel(self, x, y + theme.px(4), bounds, below=y - theme.px(20))
+        return self.chip
 
     def _open_menu(self, key, x: int, y: int) -> None:
+        """하이라이트·행을 누르면 칩 두 개: 마스킹 / 원문유지."""
         self.tip.hide()
+        if key[0] == "t" and next((i for i in self.items if i.token == key[1]), None) is None:
+            return
+        self._chip_at(x, y)
+        self._chip_root(key)
+
+    def _chip_info(self, key):
+        """(이름, 지금 상태, 바뀔 값, 지우는 값인지, 지금 가려져 있는지, 원문유지 가능)"""
         kind, ref = key
-        m = theme.menu(self)
         if kind == "t":
             it = next((i for i in self.items if i.token == ref), None)
             if it is None:
-                return
-            m.add_command(label=f"{it.label} · {_short(theme.masked(it.value) if it.value else '(위치 불명)', 30)}  →  {ref}", state="disabled")
-            m.add_separator()
-            if not it.exact:
-                m.add_command(label="원문 위치를 확정하지 못해 되돌릴 수 없어요", state="disabled")
-            elif ref in self.reverted:
-                m.add_command(label="다시 가리기", command=lambda: self._set(self.reverted, ref, None))
-            else:
-                m.add_cascade(label="되돌리기 · 원문 그대로 보내기 (사유 선택)",
-                              menu=self._reason_menu(m, lambda c: self._set(self.reverted, ref, c)))
-                m.add_command(label="이 값은 앞으로 탐지하지 않기 (오탐 등록)", command=lambda: self._ignore(it.value, ref))
+                return None
+            masked = ref not in self.reverted
+            return it.label, ("마스킹" if masked else "원문유지"), ref, False, masked, bool(it.exact)
+        if kind == "o":
+            masked = ref not in self.org_reverted
+            span = next((s for s in self.org if s.value == ref), None)
+            tag = self.app.session.tag_for(span.type, ref) if span else "[가림]"
+            label = TYPE_LABELS[span.type] if span else "조직 베이스"
+            return label, ("마스킹" if masked else "원문유지"), tag, False, masked, True
+        if kind == "b":
+            b = self.blockers[ref]
+            released = b.key in self.released
+            return TYPE_LABELS[b.type], ("원문유지" if released else "차단"), theme.masked(b.value), True, False, True
+        return TYPE_LABELS.get(self.manual[ref][0], "기타"), "마스킹 (직접 신고)", "[가림]", False, True, True
+
+    def _chip_root(self, key) -> None:
+        info = self._chip_info(key)
+        if info is None or self.chip is None:
+            return self._close_chip()
+        label, state, _, _, _, exact = info
+        if not exact:
+            self.chip.show(title=f"{label} · {state}", message="원문 위치를 확정하지 못해 원문유지를 할 수 없어요 (가린 채로 보내요).",
+                           tone="warning", chips=[Chip("마스킹", lambda: self._chip_mask(key)), Chip("원문유지", None)])
+            return
+        self.chip.show(title=f"{label} · {state}", chips=[Chip("마스킹", lambda: self._chip_mask(key)),
+                                                         Chip("원문유지", lambda: self._chip_reasons(key))])
+
+    def _chip_mask(self, key) -> None:
+        """마스킹: 바뀔 값만 보여 주고 아래 칩으로 적용한다."""
+        label, _, word, deleted, masked, _ = self._chip_info(key)
+        chips = [Chip("적용됨" if masked else "적용", None if masked else (lambda: self._chip_apply(key)))]
+        self.chip.show(title=f"{label} · 마스킹", back=lambda: self._chip_root(key), word=word, deleted=deleted,
+                       chips=chips)
+
+    def _chip_apply(self, key) -> None:
+        kind, ref = key
+        label, _, word, deleted, _, _ = self._chip_info(key)
+        if kind == "t":
+            before = self.reverted.get(ref)
+            self._set(self.reverted, ref, None)
+            undo = lambda: self._set(self.reverted, ref, before)  # noqa: E731
         elif kind == "o":
-            m.add_command(label=f"조직 베이스 · {_short(theme.masked(ref), 30)}", state="disabled")
-            m.add_separator()
-            if ref in self.org_reverted:
-                m.add_command(label="다시 가리기", command=lambda: self._set(self.org_reverted, ref, None, recheck=True))
-            else:
-                m.add_cascade(label="되돌리기 · 원문 그대로 보내기 (사유 선택)",
-                              menu=self._reason_menu(m, lambda c: self._set(self.org_reverted, ref, c, recheck=True)))
+            before = self.org_reverted.get(ref)
+            self._set(self.org_reverted, ref, None, recheck=True)
+            undo = lambda: self._set(self.org_reverted, ref, before, recheck=True)  # noqa: E731
         elif kind == "b":
             b = self.blockers[ref]
-            m.add_command(label=f"{TYPE_LABELS[b.type]} · {_short(b.value, 30)}", state="disabled")
-            m.add_separator()
-            if b.key in self.released:
-                m.add_command(label="다시 차단", command=lambda: self._set(self.released, b.key, None))
-            else:
-                m.add_command(label="이 부분 빼고 다시 검사", command=lambda: self._cut(b))
-                m.add_cascade(label="차단 해제 (사유 선택)",
-                              menu=self._reason_menu(m, lambda c: self._set(self.released, b.key, c)))
+            self.released.pop(b.key, None)
+            self._cut(b)  # 이 부분을 원문에서 빼고 다시 검사
+            undo = self.orig.edit_undo
         else:
-            m.add_command(label="신고 취소 (다시 보내기)", command=lambda: self._unreport(ref))
-        try:
-            m.tk_popup(x, y)
-        finally:
-            m.grab_release()
+            return self._close_chip()
+        message = "이 부분은 빼고 보내요" if deleted else f"{word}{ro(word)} 바꿨어요"
+        self._chip_done(label, message, undo)
+
+    def _chip_reasons(self, key) -> None:
+        label = self._chip_info(key)[0]
+        note = "기밀로 판정된 내용이에요. 원문을 보내면 보안 검토 대상으로 기록돼요." if key[0] == "b" else ""
+        self.chip.show(title=f"{label} · 원문유지 사유", back=lambda: self._chip_root(key), note=note,
+                       chips=[Chip(name, lambda code=code: self._chip_keep(key, code)) for code, name in REASONS])
+
+    def _chip_keep(self, key, code: str) -> None:
+        kind, ref = key
+        label = self._chip_info(key)[0]
+        if kind == "t":
+            it = next(i for i in self.items if i.token == ref)
+            before = self.reverted.get(ref)
+            if code == "false_positive" and it.value:
+                self._ignore(it.value, ref)  # 오탐: 이 값은 앞으로 탐지하지 않는다 (메모리)
+                value = it.value
+                undo = lambda: (self.app.ignore.discard(value), self._set(self.reverted, ref, before))  # noqa: E731
+            else:
+                self._set(self.reverted, ref, code)
+                undo = lambda: self._set(self.reverted, ref, before)  # noqa: E731
+        elif kind == "o":
+            before = self.org_reverted.get(ref)
+            self._set(self.org_reverted, ref, code, recheck=True)
+            undo = lambda: self._set(self.org_reverted, ref, before, recheck=True)  # noqa: E731
+        elif kind == "b":
+            b = self.blockers[ref]
+            before = self.released.get(b.key)
+            self._set(self.released, b.key, code)
+            undo = lambda: self._set(self.released, b.key, before)  # noqa: E731
+        else:
+            typ, value = self.manual[ref]
+            self._unreport(ref)  # 직접 신고한 값: 신고를 거둔다
+            undo = lambda: self._report(typ, value)  # noqa: E731
+        self._chip_done(label, f"원문을 유지해요 · {REASON_SHORT[code]}", undo)
+
+    def _chip_done(self, label: str, message: str, undo) -> None:
+        if self.chip is None:
+            return
+
+        def run_undo():
+            undo()
+            self._close_chip()
+
+        self.chip.show(title=label, message=message, chips=[Chip("되돌리기", run_undo, kind="ghost", icon="undo")])
 
     def _set(self, store: dict, key, reason, recheck: bool = False) -> None:
         """recheck: 서버로 보낼 글이 바뀌는 변경(이 PC에서 미리 가린 값)이면 서버에 다시 묻는다."""
@@ -577,7 +659,7 @@ class ServerReviewWindow(tk.Toplevel):
             return
         if not self._fresh():  # 고친 뒤 아직 서버 결과가 안 옴
             self.check()
-            self.app.toast("고친 내용을 서버에서 다시 검사하고 있어요. 끝나면 다시 눌러 주세요.")
+            self.app.toast("고친 내용을 서버에서 다시 검사하고 있어요. 끝나면 다시 눌러 주세요.", tone="warning")
             return
         self.app.copy_to_clipboard(self.outgoing)
         action = "send_as_is" if g == "O" else "send_transformed"
@@ -589,17 +671,24 @@ class ServerReviewWindow(tk.Toplevel):
         self._close()
 
     def on_original(self) -> None:
-        dlg = ReasonDialog(self, blocked=self.grade() == "C",
-                           note="원문은 저장되지 않고, 유형·건수·사유와 원문 해시가 서버 로그에 남아요.")
-        self.wait_window(dlg)
-        if dlg.result is None:
-            return
+        """원문 그대로 사용: 대화상자 대신 버튼 위에 사유 칩 셋을 펼친다."""
+        btn = self.btn_original
+        panel = self._chip_at(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+        panel.anchor = (btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height(), btn.winfo_rooty())
+        blocked = self.grade() == "C"
+        note = ("기밀로 판정된 내용이에요. 외부 AI에 보내면 보안 검토 대상으로 기록돼요." if blocked
+                else "원문은 저장하지 않고, 유형·건수·사유와 원문 해시가 서버 로그에 남아요.")
+        panel.show(title="원문 그대로 사용 · 사유", note=note, note_tone="warning" if blocked else "info",
+                   chips=[Chip(name, lambda code=code: self._send_original(code)) for code, name in REASONS])
+
+    def _send_original(self, reason: str) -> None:
+        self._close_chip()
         self.app.copy_to_clipboard(self._text())
         if self._fresh():
             action = "send_as_is" if self.grade() == "O" else "revert_original"
-            self.app.server_decide(self.result, action, dlg.result)
-        self._log_local("sent_original", reason=dlg.result)
-        self.app.toast("원문을 복사했어요 · 선택한 사유가 기록됐어요")
+            self.app.server_decide(self.result, action, reason)
+        self._log_local("sent_original", reason=reason)
+        self.app.toast("원문을 복사했어요 · 고른 사유가 기록됐어요")
         self._close()
 
     def on_cancel(self) -> None:
@@ -634,6 +723,7 @@ class ServerReviewWindow(tk.Toplevel):
     def _close(self) -> None:
         self._gen += 1  # 늦게 온 서버 결과는 버린다
         self.tip.hide()
+        self._close_chip()
         self.app.review_closed(self)
         self.destroy()
 
@@ -649,7 +739,7 @@ class ServerRestoreWindow(tk.Toplevel):
         self.app = app
         self.result = ""
         self._q: queue.Queue = queue.Queue()
-        theme.window(self, "답변 복원 (서버) — KP Guard", 1080, 680, 820, 520)
+        theme.window(self, f"답변 복원 (서버) — {theme.APP_TITLE}", 1080, 680, 820, 520)
         self.protocol("WM_DELETE_WINDOW", self._close)
         build_restore_layout(self, "AI 답변 (자리표시 포함)",
                              "서버는 검사 후 10분 안에 한 번만 복원해요. 비밀값(API 키·비밀번호)은 되돌리지 않아요")

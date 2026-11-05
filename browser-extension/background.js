@@ -5,15 +5,16 @@ const enc = new TextEncoder();
 const actions = new Set([
   'status',
   'preview',
-  'inspect',
-  'selection',
-  'decide',
+  'mask',
+  'commit',
+  'undo',
+  'keep',
+  'unkeep',
+  'reset',
   'restore',
   'files',
   'settings',
   'server_tools',
-  'detail',
-  'desktop_restore',
 ]);
 const trusted = new Set(['https://chatgpt.com', 'https://claude.ai']);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -31,7 +32,7 @@ async function post(path, json, headers = {}) {
     signal: AbortSignal.timeout(35000),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'KP Guard 연결을 확인해 주세요.');
+  if (!response.ok) throw new Error(data.error || 'AI 누리 보안 연결을 확인해 주세요.');
   return data;
 }
 
@@ -47,7 +48,7 @@ async function call(message, sender) {
     throw new Error('허용되지 않은 요청입니다.');
   }
   const { key } = await api.storage.local.get('key');
-  if (!key) throw new Error('확장 아이콘에서 KP Guard 연결 코드를 입력해 주세요.');
+  if (!key) throw new Error('확장 아이콘에서 AI 누리 보안 연결 코드를 입력해 주세요.');
   const hmac = await crypto.subtle.importKey(
     'raw',
     enc.encode(key),
@@ -77,7 +78,7 @@ api.runtime.onMessage.addListener((message, sender, respond) => {
     (error) => {
       const note =
         error instanceof TypeError || error.name === 'TimeoutError'
-          ? 'KP Guard 연결을 확인해 주세요. PC 앱과 팀 서버가 응답해야 합니다.'
+          ? 'AI 누리 보안 연결을 확인해 주세요. PC 앱과 팀 서버가 응답해야 해요.'
           : error.message;
       respond({ error: note });
     },

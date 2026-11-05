@@ -12,7 +12,7 @@ class FileSaveSafetyTests(unittest.TestCase):
             source.write_bytes(b'original')
             alias = Path(d) / '별칭.xlsx'
             os.link(source, alias)
-            obj = SimpleNamespace(source=source, report=SimpleNamespace(file_bytes=b'protected'), app=SimpleNamespace(toast=lambda _: None))
+            obj = SimpleNamespace(source=source, report=SimpleNamespace(file_bytes=b'protected'), app=SimpleNamespace(toast=lambda *_, **__: None))
             self.assertFalse(FileWindow.save_to(obj, alias))
             self.assertFalse(FileWindow.save_to(obj, Path(d) / 'out.txt'))
             self.assertEqual(source.read_bytes(), b'original')
