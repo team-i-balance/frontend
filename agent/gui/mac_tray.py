@@ -2,6 +2,7 @@
 try:
     from AppKit import NSStatusBar, NSVariableStatusItemLength, NSMenu, NSMenuItem
     from Foundation import NSObject
+    import objc
 except ImportError:
     NSObject = None
 
@@ -13,7 +14,7 @@ def available():
 if NSObject is not None:
     class _Actions(NSObject):
         def initWithApp_(self, app):
-            self = super().init()
+            self = objc.super(_Actions, self).init()
             if self is not None:
                 self.app = app
             return self
