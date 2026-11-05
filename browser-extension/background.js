@@ -63,6 +63,7 @@ async function call(message, sender) {
   }
   const body = JSON.stringify({
     ...message,
+    site: !extensionPage && sender.tab.active ? new URL(sender.url).hostname : null,
     channel: String(sender.tab?.id ?? 'settings') + '-' + String(message.document || '').slice(0, 64),
   });
   return post('action', body, {

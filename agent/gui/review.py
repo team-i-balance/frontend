@@ -81,10 +81,11 @@ def build_layout(win, out_title: str, cols=LOCAL_COLUMNS):
 
 
 class ReviewWindow(tk.Toplevel):
-    def __init__(self, app, text: str = "", source: str = "manual"):
+    def __init__(self, app, text: str = "", source: str = "manual", selected=None):
         super().__init__(app.root)
         self.app = app
         self.source = source
+        self.overlay_selection = selected
         self.decisions: dict[tuple, dict] = {}
         self.manual: list[tuple[str, str]] = []
         self.ignored_types: list[str] = []
@@ -193,6 +194,9 @@ class ReviewWindow(tk.Toplevel):
             self.orig.tag_add(tag, theme.index(it.span.start), theme.index(it.span.end))
             self.orig.tag_configure(tag, **self._style_orig(it))
             self._bind_tag(self.orig, tag, i)
+            if self.overlay_selection == (it.span.start, it.span.end):
+                self.overlay_selection = None
+                self.after_idle(lambda idx=i, start=it.span.start: theme.open_at_mark(self, start, idx))
             if it.is_blocker:
                 self.orig.tag_lower(tag)  # 블록 안의 개별 항목이 위에 보이고 먼저 클릭되도록
         self.orig.tag_raise("sel")

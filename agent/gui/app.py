@@ -15,6 +15,7 @@ from tkinter import messagebox
 
 from ..browser.actions import BrowserActions
 from ..browser.bridge import BrowserBridge
+from ..overlay.controller import NativeOverlay
 from .. import config
 from ..detect.model import ModelManager
 from ..detect.pipeline import detect
@@ -110,6 +111,7 @@ class App:
 
         self.browser = None
         self.browser_actions = BrowserActions(self)
+        self.overlay = NativeOverlay(self)
         if self.settings.get("browser_key"):
             self.start_browser()
         self.tray = tray.Tray(self) if tray.available() else None
@@ -472,13 +474,13 @@ class App:
         self._last_seq = self._own_seq
 
     # ================================================================== 창 열기
-    def open_review(self, text: str = "", source: str = "manual", local: bool = False) -> None:
+    def open_review(self, text: str = "", source: str = "manual", local: bool = False, selected=None) -> None:
         """서버 처리 모드면 서버 점검 창, 아니면(또는 local=True면) 이 PC 엔진 점검 창."""
         if not text and self.reviews:  # 빈 창 요청이면 기존 창을 앞으로
             self.reviews[-1]._bring_front()
             return
         cls = ServerReviewWindow if self.server_mode() and not local else ReviewWindow
-        self.reviews.append(cls(self, text, source))
+        self.reviews.append(cls(self, text, source, selected=selected))
 
     def review_closed(self, win) -> None:
         if win in self.reviews:
@@ -559,9 +561,10 @@ class App:
             if self.settings_win:
                 self.settings_win.v_auto.set(autostart.is_enabled())
         if background and self.tray:
-            self.tray.notify("백그라운드에서 실행 중이에요. 프롬프트를 복사하면 자동으로 점검해요.")
+            self.tray.notify("ChatGPT·Claude 입력창에서 감지된 단어를 클릭해 점검할 수 있습니다.")
 
     def quit(self) -> None:
+        self.overlay.close()
         if self.browser:
             self.browser.stop()
         self.hotkeys.stop()

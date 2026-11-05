@@ -82,11 +82,18 @@ class BrowserActions:
         self.generation = 0
         self.legacy_server = None
         self.preview_retry_at = 0.0
+        self.extension = None
 
     def clear(self):
         with self.lock:
             self.generation += 1
             self.works.clear()
+            self.extension = None
+
+    def extension_covers(self, site, text):
+        with self.lock:
+            lease = self.extension
+            return bool(lease and lease[1:3] == (site, hash(text)) and time.monotonic() < lease[3])
 
     def expire(self):
         with self.lock:
@@ -97,11 +104,18 @@ class BrowserActions:
     def handle(self, data):
         action = data.get("action")
         active = self.app.monitoring_active()
+        site = data.get("site")
+        channel = data.get("channel")
+        if active and site in ("chatgpt.com", "claude.ai") and isinstance(channel, str):
+            with self.lock:
+                if action == "preview" and isinstance(data.get("text"), str):
+                    self.extension = (channel, site, hash(data["text"]), time.monotonic() + 7)
+                elif action == "status" and self.extension and self.extension[:2] == (channel, site):
+                    self.extension = (*self.extension[:3], time.monotonic() + 7)
         if action == "status":
             return {"active": active, "mode": "server" if self.app.server_mode() else "local"}
         if not active:
             raise ChipError("KP Guard 감시가 일시정지 또는 꺼짐 상태입니다.")
-        channel = data.get("channel")
         if not isinstance(channel, str) or not 1 <= len(channel) <= 120:
             raise ChipError("브라우저 연결을 다시 열어 주세요.")
         self.expire()

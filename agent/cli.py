@@ -20,23 +20,7 @@ from prompt_toolkit.styles import Style
 
 from .browser.actions import ChipError
 from .browser.peer import Peer
-
-
-def stable_ranges(spans, old, new):
-    if old == new:
-        return spans
-    prefix = 0
-    while prefix < min(len(old), len(new)) and old[prefix] == new[prefix]:
-        prefix += 1
-    suffix = 0
-    while suffix < min(len(old), len(new)) - prefix and old[-1 - suffix] == new[-1 - suffix]:
-        suffix += 1
-    delta = len(new) - len(old)
-    return [
-        s if s["end"] < prefix else {**s, "start": s["start"] + delta, "end": s["end"] + delta}
-        for s in spans
-        if s["end"] < prefix or s["start"] > len(old) - suffix
-    ]
+from .overlay.live import stable_ranges
 
 
 class Highlights(Processor):

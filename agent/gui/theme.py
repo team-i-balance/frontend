@@ -191,6 +191,18 @@ def compact(win: tk.Misc) -> bool:
     return win.winfo_screenheight() <= px(800)
 
 
+def open_at_mark(review, start, item):
+    if not review.winfo_exists():
+        return
+    position = index(start)
+    review.orig.see(position)
+    review.orig.update_idletasks()
+    box = review.orig.bbox(position)
+    if box:
+        x, y, _, height = box
+        review._open_menu(item, review.orig.winfo_rootx() + x, review.orig.winfo_rooty() + y + height)
+
+
 def index(n: int) -> str:
     """파이썬 문자열 위치 → Tk Text 인덱스"""
     return f"1.0 + {n} chars"

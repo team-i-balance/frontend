@@ -19,7 +19,9 @@ import sys  # noqa: E402
 def _dpi_aware() -> None:
     if sys.platform == "win32":
         try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            # UI Automation reports physical screen coordinates, also on a second monitor.
+            if not ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
         except (AttributeError, OSError):
             pass
 

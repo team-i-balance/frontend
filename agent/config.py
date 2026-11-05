@@ -13,6 +13,7 @@ ASSETS = Path(__file__).resolve().parent / "assets"
 OLD_SERVER_URL = "http://13.193.207.69:8501"
 
 DEFAULTS = {
+    "native_overlay": True,
     "monitoring": True,        # 감시 켜기/끄기 (R2)
     "clipboard_watch": True,   # 복사한 프롬프트 자동 점검
     "autostart_asked": False,  # 첫 실행 시 자동 시작 동의를 물었는지

@@ -35,10 +35,11 @@ def _host(app) -> str:
 
 
 class ServerReviewWindow(tk.Toplevel):
-    def __init__(self, app, text: str = "", source: str = "manual"):
+    def __init__(self, app, text: str = "", source: str = "manual", selected=None):
         super().__init__(app.root)
         self.app = app
         self.source = source
+        self.overlay_selection = selected
         self.result = None            # ProcessResult
         self.result_text = ""         # 결과를 받은 원문
         self.items = []               # align() 결과
@@ -266,6 +267,9 @@ class ServerReviewWindow(tk.Toplevel):
             self.orig.tag_add(tag, theme.index(s), theme.index(e))
             self.orig.tag_configure(tag, **style)
             self._bind_mark(self.orig, tag, key)
+            if self.overlay_selection == (s, e):
+                self.overlay_selection = None
+                self.after_idle(lambda target=key, start=s: theme.open_at_mark(self, start, target))
             if key[0] == "b":
                 self.orig.tag_lower(tag)
         self.orig.tag_raise("sel")
