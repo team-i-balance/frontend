@@ -34,11 +34,60 @@ def mouse(x, y, down):
         Q.CGEventPost(Q.kCGHIDEventTap, event)
 
 
+def activate_fixture(page, field):
+    from agent.overlay import windows as win
+
+    window = win.u.WindowControl(searchDepth=1, RegexName=".*KP Native Fixture.*")
+    assert window.Exists(5), "fixture window not visible"
+    hwnd = window.NativeWindowHandle
+    # CDP keyboard events can reach a background tab. Use the real foreground desktop instead.
+    move = win.api(
+        win.user,
+        "SetWindowPos",
+        win.W.BOOL,
+        win.W.HWND,
+        win.W.HWND,
+        win.C.c_int,
+        win.C.c_int,
+        win.C.c_int,
+        win.C.c_int,
+        win.W.UINT,
+    )
+    move(hwnd, -1, 0, 0, 0, 0, 0x13)
+    try:
+        window.SetActive(waitTime=0)
+        pos = field.evaluate("""el => { const r=el.getBoundingClientRect(), d=devicePixelRatio;
+            return [(screenX+(outerWidth-innerWidth)/2+r.left+12)*d,
+                    (screenY+outerHeight-innerHeight+r.top+12)*d] }""")
+        x, y = map(round, pos)
+        mouse(x, y, True)
+        time.sleep(0.08)
+        mouse(x, y, False)
+        assert win.foreground() == hwnd, "Windows did not foreground the actual fixture window"
+        field.focus()
+    finally:
+        move(hwnd, -2, 0, 0, 0, 0, 0x13)
+    return hwnd
+
+
+def type_direct(page, hwnd, text):
+    if sys.platform != "win32":
+        page.keyboard.type(text, delay=35)
+        return
+    from agent.overlay import windows as win
+
+    for char in text:
+        if win.foreground() != hwnd:
+            raise AssertionError("fixture lost Windows foreground before a physical keystroke")
+        win.u.SendKeys("{Space}" if char == " " else char, interval=0.035, waitTime=0)
+
+
 def main():
     _dpi_aware()
     root = tk.Tk()
     root.withdraw()
     theme.setup(root)
+    root.update()
     with FixtureBackend() as backend, sync_playwright() as play:
         app = Desktop(backend.url)
         app.root, app.settings = root, {"native_overlay": True}
@@ -46,6 +95,7 @@ def main():
         app.open_review = app.open_restore = app.open_files = lambda *args, **kwargs: None
         app.post = lambda *args: None
         overlay = NativeOverlay(app)
+        root.update()
 
         def until(predicate, description):
             limit = time.monotonic() + 12
@@ -54,13 +104,22 @@ def main():
                 if predicate():
                     return
                 time.sleep(0.01)
+            if sys.platform == "win32":
+                from agent.overlay import windows as win
+
+                active, pid = win.foreground(), win.W.DWORD()
+                win.pid_for(active, win.C.byref(pid))
+                print(
+                    f"Windows foreground={win.executable(pid.value)}, same-window={active == hwnd}, stage={overlay.stage}",
+                    flush=True,
+                )
             raise AssertionError(
                 f"{description} on {host} ({overlay.status}, stage={overlay.stage}, revisions={len(app.revisions)}, marks={len(overlay.shown.marks)})"
             )
 
         try:
             browser = play.chromium.launch(channel="chrome", headless=False)
-            ctx = browser.new_context()
+            ctx = browser.new_context(no_viewport=True)
             documents = {
                 "chatgpt.com": '<textarea id="prompt-textarea" aria-label="Message ChatGPT"></textarea>',
                 "claude.ai": '<div role="textbox" aria-multiline="true" aria-label="Reply to Claude" contenteditable="true" class="tiptap ProseMirror"></div>',
@@ -89,16 +148,9 @@ def main():
                 page.bring_to_front()
                 field = page.locator("textarea,[contenteditable]")
                 field.click()
-                if sys.platform == "win32":
-                    from agent.overlay import windows as win
-
-                    # Hosted desktops can start Chromium behind the runner shell.
-                    window = win.u.WindowControl(searchDepth=1, RegexName=".*KP Native Fixture.*")
-                    if window.Exists(2):
-                        window.SetActive(waitTime=0)
-                    field.click()
+                hwnd = activate_fixture(page, field) if sys.platform == "win32" else None
                 before = len(app.revisions)
-                page.keyboard.type("sample ")
+                type_direct(page, hwnd, "sample ")
                 if host == "example.org":
                     until(lambda: not overlay.shown.marks, "hide after navigation")
                     time.sleep(0.3)
@@ -108,7 +160,7 @@ def main():
                     lambda: any("sample" in revision for revision in app.revisions[before:]),
                     "direct typing reached preview",
                 )
-                page.keyboard.type(PHONE_TEXT)
+                type_direct(page, hwnd, PHONE_TEXT)
                 until(
                     lambda: overlay.shown.marks and PHONE_TEXT in overlay.shown.text,
                     "native range highlighted",

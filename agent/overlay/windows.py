@@ -248,11 +248,16 @@ class Reader:
                     continue
                 pattern = field.GetPattern(u.PatternId.TextPattern)
                 if pattern:
-                    for view in reversed(pattern.GetVisibleRanges()):
-                        raw = view.GetText(100001)
-                        draft = terminal_draft(raw, u.GetWindowText(hwnd))
-                        if draft is not None:
-                            return self.snapshot(hwnd, "cli", field, view, raw, draft)
+                    visible = pattern.GetVisibleRanges()
+                    if not visible:
+                        continue
+                    # Console providers may expose the viewport as one range per visible row.
+                    view = visible[0].Clone()
+                    view.MoveEndpointByRange(1, visible[-1], 1, 0)
+                    raw = view.GetText(100001)
+                    draft = terminal_draft(raw, u.GetWindowText(hwnd))
+                    if draft is not None:
+                        return self.snapshot(hwnd, "cli", field, view, raw, draft)
             return None
 
         docs = [n for n in lineage if n.ControlTypeName == "DocumentControl"]
