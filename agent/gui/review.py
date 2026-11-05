@@ -17,7 +17,7 @@ from ..detect.pipeline import COVERAGE_LABELS, detect
 from ..detect.scoring import overall_grade
 from ..detect.span import TYPE_LABELS
 from ..sanitize.engine import ALLOWED, STRATEGY_LABELS, make_items, sanitize
-from ..system import win32
+from ..system import platform_api
 from . import theme
 
 REASONS = [("false_positive", "오탐이에요 (개인정보가 아님)"), ("business_need", "업무상 꼭 필요해요"),
@@ -453,7 +453,7 @@ class ReviewWindow(tk.Toplevel):
         self._close()
 
     def _load_clipboard(self) -> None:
-        text = win32.get_clipboard_text()
+        text = platform_api.get_clipboard_text()
         if text:
             self.orig.delete("1.0", "end")
             self.orig.insert("1.0", text)

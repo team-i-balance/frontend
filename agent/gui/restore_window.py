@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from ..sanitize.restore import restore
-from ..system import win32
+from ..system import platform_api
 from . import theme
 
 
@@ -80,7 +80,7 @@ class RestoreWindow(tk.Toplevel):
             self.banner.set("neutral", "AI 답변 복원", f"현재 매핑 {n}개 · 이 답변에는 되돌릴 가짜 값이 없어요")
 
     def _paste(self) -> None:
-        text = win32.get_clipboard_text()
+        text = platform_api.get_clipboard_text()
         if text:
             self.src.delete("1.0", "end")
             self.src.insert("1.0", text)

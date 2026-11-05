@@ -29,8 +29,8 @@ def main(argv=None) -> None:
     parser.add_argument("--background", action="store_true", help="창 없이 트레이에 상주")
     args = parser.parse_args(argv)
 
-    from .system import win32
-    if not win32.acquire_single_instance():
+    from .system import platform_api
+    if not platform_api.acquire_single_instance():
         import tkinter as tk
         from tkinter import messagebox
         root = tk.Tk()
