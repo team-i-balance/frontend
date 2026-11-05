@@ -63,7 +63,7 @@ class LiveTests(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         seen = []
 
-        def preview(text):
+        def preview(text, key=None):
             seen.append(text)
             if len(seen) == 1:
                 entered.set()
@@ -130,10 +130,9 @@ class LiveTests(unittest.TestCase):
         )
         overlay._mouse(frame, 25, 25, True)
         overlay._mouse(frame, 25, 25, False)
-        overlay._open.assert_called_once_with(frame, frame.marks[0], 25, 25)
+        overlay._open.assert_called_once_with(frame, frame.marks[0])
         chip = Mock()
-        chip.winfo_rootx.return_value = chip.winfo_rooty.return_value = 50
-        chip.winfo_width.return_value = chip.winfo_height.return_value = 20
+        chip.contains.return_value = False
         overlay.chip = chip
         overlay._mouse(frame, 100, 100, True)
         overlay._mouse(frame, 100, 100, False)

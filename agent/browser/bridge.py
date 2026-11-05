@@ -124,5 +124,5 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, UnicodeError):
             return self.reply(400, {"error": "요청 형식을 확인해 주세요."})
         except Exception:
-            return self.reply(500, {"error": "KP Guard에서 요청을 처리하지 못했습니다."})
+            return self.reply(500, {"error": "AI 누리 보안 앱에서 요청을 처리하지 못했어요."})
         self.reply(200, result)

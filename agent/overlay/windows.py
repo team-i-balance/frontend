@@ -3,6 +3,8 @@
 import ctypes as C
 import ntpath
 import os
+import threading
+import time
 from collections import deque
 from ctypes import wintypes as W
 
@@ -11,7 +13,7 @@ from comtypes import COMError
 from comtypes.client import CreateObject, GetModule
 
 from ..server.client import MAX_TEXT
-from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site, terminal_draft
+from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, end_only, site, terminal_draft
 
 user = C.WinDLL("user32", use_last_error=True)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -130,23 +132,23 @@ def editor_range(field, doc):
     return None
 
 
-def boxes(text_range, raw, a, b, console=False):
+def exact_range(text_range, raw, a, b, console=False):
     """UIA text units need not match Python code points (emoji, CRLF). Verify the exact occurrence."""
     rest = text_range.Clone()
     needle = raw[a:b]
     if not needle:
-        return []
+        return None
     # Advance past earlier occurrences so repeated phone numbers map independently.
     cursor = 0
     while cursor <= a:
         expected = raw.find(needle, cursor)
         match = rest.FindText(needle, False, False)
         if expected < 0 or expected > a or not match:
-            return []
+            return None
         if expected == a:
-            # Providers can normalize whitespace/case. Never paint an unverified offset.
+            # Providers can normalize whitespace/case. Never paint or edit an unverified offset.
             if match.GetText(-1) != needle:
-                return []
+                return None
             if raw.count(needle) > 1:
                 prefix = text_range.Clone()
                 prefix.MoveEndpointByRange(1, match, 0, 0)
@@ -155,11 +157,99 @@ def boxes(text_range, raw, a, b, console=False):
                 if console:
                     actual, wanted = actual.rstrip(), wanted.rstrip()
                 if actual != wanted:
-                    return []
-            return [rect(r) for r in match.GetBoundingRectangles()]
+                    return None
+            return match
         cursor = expected + len(needle)
         rest.MoveEndpointByRange(0, match, 1, 0)
-    return []
+    return None
+
+
+def boxes(text_range, raw, a, b, console=False):
+    match = exact_range(text_range, raw, a, b, console)
+    return [rect(r) for r in match.GetBoundingRectangles()] if match else []
+
+
+# ---------------------------------------------------------------- typed input (in-place edits)
+ULONG_PTR = C.c_size_t
+INJECTED = 0x4B50  # dwExtraInfo of our own keystrokes ("KP")
+
+
+class MOUSEINPUT(C.Structure):
+    _fields_ = [("dx", W.LONG), ("dy", W.LONG), ("mouseData", W.DWORD), ("dwFlags", W.DWORD),
+                ("time", W.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
+class KEYBDINPUT(C.Structure):
+    _fields_ = [("wVk", W.WORD), ("wScan", W.WORD), ("dwFlags", W.DWORD), ("time", W.DWORD),
+                ("dwExtraInfo", ULONG_PTR)]
+
+
+class HARDWAREINPUT(C.Structure):
+    _fields_ = [("uMsg", W.DWORD), ("wParamL", W.WORD), ("wParamH", W.WORD)]
+
+
+class _INPUTUNION(C.Union):
+    _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+
+
+class INPUT(C.Structure):
+    _fields_ = [("type", W.DWORD), ("u", _INPUTUNION)]
+
+
+send_input = api(user, "SendInput", W.UINT, W.UINT, C.POINTER(INPUT), C.c_int)
+set_foreground = api(user, "SetForegroundWindow", W.BOOL, W.HWND)
+
+
+def _key(vk=0, scan=0, flags=0):
+    return INPUT(type=1, u=_INPUTUNION(ki=KEYBDINPUT(vk, scan, flags, 0, INJECTED)))
+
+
+def keystrokes(events):
+    events = list(events)
+    if not events:
+        return True
+    array = (INPUT * len(events))(*events)
+    return send_input(len(events), array, C.sizeof(INPUT)) == len(events)
+
+
+def type_text(text):
+    """Type characters as Unicode keystrokes (bypasses the IME and keyboard layout)."""
+    units = text.encode("utf-16-le")
+    events = []
+    for i in range(0, len(units), 2):
+        code = int.from_bytes(units[i:i + 2], "little")
+        events += [_key(scan=code, flags=0x0004), _key(scan=code, flags=0x0004 | 0x0002)]  # UNICODE, KEYUP
+    return keystrokes(events)
+
+
+def press(vk, times=1):
+    return keystrokes([e for _ in range(times) for e in (_key(vk=vk), _key(vk=vk, flags=0x0002))])
+
+
+def bring_to_front(hwnd, wait=0.5):
+    if foreground() == hwnd:
+        return True
+    set_foreground(hwnd)
+    until = time.monotonic() + wait
+    while time.monotonic() < until:
+        if foreground() == hwnd:
+            return True
+        time.sleep(0.02)
+    return foreground() == hwnd
+
+
+def give_back(hwnd):
+    """칩을 띄우며 포커스를 가져왔으면 입력창 창에 돌려준다 (기다리지 않음)."""
+    if foreground() != hwnd:
+        set_foreground(hwnd)
+
+
+def no_activate(window):
+    """Chip clicks must not take focus from the AI editor (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)."""
+    hwnd = int(window.wm_frame(), 16)
+    get = api(user, "GetWindowLongPtrW", C.c_ssize_t, W.HWND, C.c_int)
+    put = api(user, "SetWindowLongPtrW", C.c_ssize_t, W.HWND, C.c_int, C.c_ssize_t)
+    put(hwnd, -20, get(hwnd, -20) | 0x08000000 | 0x00000080)
 
 
 def console_line_boxes(view, raw, a, b):
@@ -220,6 +310,11 @@ class Reader:
 
     def reset(self):
         self.saved = None
+
+    @staticmethod
+    def focus(key):
+        """Before typing: give the foreground back to the editor's window if a chip click took it."""
+        return bring_to_front(key[0])
 
     def location(self, doc, hwnd, use_bar):
         url = document_url(doc)
@@ -305,6 +400,7 @@ class Reader:
             return None
 
         docs = [n for n in lineage if n.ControlTypeName == "DocumentControl"]
+        in_focus = bool(docs)  # the keyboard focus is inside the page (not the address bar or other chrome)
         # After clicking page chrome the focused UIA element often belongs to the address bar.
         # Resolve the page under the foreground window and keep scanning its original composer.
         if not docs:
@@ -322,6 +418,8 @@ class Reader:
         url = urls[0]
         doc_id = tuple(doc.GetRuntimeId())
         candidate = next((n for n in lineage[: lineage.index(doc)] if is_editor(n)), None)
+        # Enter is guarded only while the keyboard focus is in the composer itself.
+        typing = in_focus and candidate is not None
         cache_key = hwnd, url, doc_id
         if candidate is None and self.saved and self.saved[0] == cache_key:
             previous = self.saved[1]
@@ -340,11 +438,11 @@ class Reader:
         if view:
             raw = view.GetText(MAX_TEXT + 1)
             if len(raw) <= MAX_TEXT:
-                return self.snapshot(hwnd, site(url), field, view, raw, Draft.plain(raw), url)
+                return self.snapshot(hwnd, site(url), field, view, raw, Draft.plain(raw), url, typing)
         return None
 
     @staticmethod
-    def snapshot(hwnd, kind, field, view, raw, draft, url=""):
+    def snapshot(hwnd, kind, field, view, raw, draft, url="", focused=True):
         viewport = rect(field.BoundingRectangle)
         if kind == "cli" and (viewport[2] <= viewport[0] or viewport[3] <= viewport[1]):
             area = W.RECT()
@@ -366,7 +464,29 @@ class Reader:
                     if visible:
                         yield visible
 
-        return Snapshot((hwnd, kind, tuple(field.GetRuntimeId()), url), draft, ranges)
+        def replace(a, b, new):
+            if foreground() != hwnd and not bring_to_front(hwnd):
+                return False
+            if kind == "cli":
+                # A TUI owns its caret. Retype only the value at the end of the prompt.
+                if not end_only(draft, a, b):
+                    return False
+                tail = draft.text[a:]
+                return press(0x08, len(tail)) and type_text(new)  # VK_BACK
+            parts = list(draft.parts(a, b))
+            if len(parts) != 1:
+                return False
+            match = exact_range(view, raw, *parts[0])
+            if match is None:
+                return False
+            try:
+                match.Select(waitTime=0)
+            except TypeError:  # older uiautomation without waitTime
+                match.Select()
+            time.sleep(0.03)
+            return type_text(new) if new else press(0x08)
+
+        return Snapshot((hwnd, kind, tuple(field.GetRuntimeId()), url), draft, ranges, replace, viewport, focused)
 
 
 class WNDCLASS(C.Structure):
@@ -387,17 +507,24 @@ class WNDCLASS(C.Structure):
 class Paint:
     def __init__(self):
         self.handles = []
+        self.alphas = []
         self.name = "KPGuardTextMark"
         self.instance = api(kernel, "GetModuleHandleW", W.HMODULE, W.LPCWSTR)(None)
-        self.brush = api(gdi, "CreateSolidBrush", W.HBRUSH, W.DWORD)(0x23A6F6)
+        # Signal blue #3D7EF7 (COLORREF is 0x00BBGGRR): a light fill plus a 2px underline per range.
+        self.brush = api(gdi, "CreateSolidBrush", W.HBRUSH, W.DWORD)(0xF77E3D)
         wc = WNDCLASS(
             proc=C.cast(user.DefWindowProcW, C.c_void_p),
             instance=self.instance,
             brush=self.brush,
             name=self.name,
         )
-        if not api(user, "RegisterClassW", W.ATOM, C.POINTER(WNDCLASS))(C.byref(wc)):
-            raise C.WinError(C.get_last_error())
+        register = api(user, "RegisterClassW", W.ATOM, C.POINTER(WNDCLASS))
+        if not register(C.byref(wc)):
+            error = C.get_last_error()
+            # A previous overlay in this process left the class registered: replace it with this brush.
+            unregister = api(user, "UnregisterClassW", W.BOOL, W.LPCWSTR, W.HINSTANCE)
+            if error != 1410 or not unregister(self.name, self.instance) or not register(C.byref(wc)):
+                raise C.WinError(error)
         self.create = api(
             user,
             "CreateWindowExW",
@@ -423,7 +550,11 @@ class Paint:
         self.destroy = api(user, "DestroyWindow", W.BOOL, W.HWND)
 
     def draw(self, regions):
-        for i, (x, y, r, b) in enumerate(regions):
+        shapes = []
+        for x, y, r, b in regions:
+            shapes.append((x, y, r, b, 64))                       # fill ~25%
+            shapes.append((x, max(y, b - 2), r, b, 235))          # underline
+        for i, (x, y, r, b, alpha) in enumerate(shapes):
             if i == len(self.handles):
                 # WS_EX_LAYERED | TRANSPARENT | TOOLWINDOW | NOACTIVATE + WS_POPUP.
                 hwnd = self.create(
@@ -431,10 +562,13 @@ class Paint:
                 )
                 if not hwnd:
                     raise C.WinError(C.get_last_error())
-                self.layer(hwnd, 0, 85, 2)
                 self.handles.append(hwnd)
+                self.alphas.append(None)
+            if self.alphas[i] != alpha:
+                self.layer(self.handles[i], 0, alpha, 2)
+                self.alphas[i] = alpha
             self.move(self.handles[i], -1, x, y, r - x, b - y, 0x0050)
-        for hwnd in self.handles[len(regions) :]:
+        for hwnd in self.handles[len(shapes) :]:
             self.show(hwnd, 0)
 
     def pointer(self):
@@ -457,3 +591,73 @@ class Paint:
             self.destroy(hwnd)
         api(user, "UnregisterClassW", W.BOOL, W.LPCWSTR, W.HINSTANCE)(self.name, self.instance)
         api(gdi, "DeleteObject", W.BOOL, W.HANDLE)(self.brush)
+
+
+class KBDLLHOOKSTRUCT(C.Structure):
+    _fields_ = [("vkCode", W.DWORD), ("scanCode", W.DWORD), ("flags", W.DWORD), ("time", W.DWORD),
+                ("dwExtraInfo", ULONG_PTR)]
+
+
+HOOKPROC = C.WINFUNCTYPE(W.LPARAM, C.c_int, W.WPARAM, W.LPARAM)
+call_next_hook = api(user, "CallNextHookEx", W.LPARAM, W.HHOOK, C.c_int, W.WPARAM, W.LPARAM)
+
+
+class EnterGuard:
+    """While highlights remain, swallow a plain Enter (send) in that editor's window. Shift+Enter still adds a line.
+
+    target() returns the guarded window handle or None. blocked() runs on the hook thread and must only post.
+    """
+
+    def __init__(self, target, blocked):
+        self.target, self.blocked = target, blocked
+        self.hook = None
+        self.thread_id = None
+        self.swallowed = False
+        self._proc = HOOKPROC(self._handle)
+
+    def start(self):
+        ready = threading.Event()
+
+        def run():
+            self.thread_id = kernel.GetCurrentThreadId()
+            install = api(user, "SetWindowsHookExW", W.HHOOK, C.c_int, HOOKPROC, W.HINSTANCE, W.DWORD)
+            module = api(kernel, "GetModuleHandleW", W.HMODULE, W.LPCWSTR)(None)
+            self.hook = install(13, self._proc, module, 0)  # WH_KEYBOARD_LL
+            ready.set()
+            if not self.hook:
+                return
+            msg = W.MSG()
+            get = api(user, "GetMessageW", W.BOOL, C.POINTER(W.MSG), W.HWND, W.UINT, W.UINT)
+            while get(C.byref(msg), None, 0, 0) > 0:
+                user.TranslateMessage(C.byref(msg))
+                user.DispatchMessageW(C.byref(msg))
+            api(user, "UnhookWindowsHookEx", W.BOOL, W.HHOOK)(self.hook)
+            self.hook = None
+
+        threading.Thread(target=run, daemon=True, name="enter-guard").start()
+        ready.wait(2)
+        if not self.hook:
+            raise OSError("keyboard hook unavailable")
+
+    def _handle(self, code, wparam, lparam):
+        try:
+            if code == 0:
+                info = C.cast(lparam, C.POINTER(KBDLLHOOKSTRUCT)).contents
+                if info.vkCode == 0x0D and not info.flags & 0x10:  # VK_RETURN, not injected
+                    if wparam in (0x0100, 0x0104):  # WM_KEYDOWN, WM_SYSKEYDOWN
+                        target = self.target()
+                        shift = user.GetAsyncKeyState(0x10) & 0x8000
+                        if target and not shift and foreground() == target:
+                            self.swallowed = True
+                            self.blocked()
+                            return 1
+                    elif wparam in (0x0101, 0x0105) and self.swallowed:
+                        self.swallowed = False
+                        return 1
+        except Exception:
+            pass
+        return call_next_hook(None, code, wparam, lparam)
+
+    def stop(self):
+        if self.thread_id:
+            api(user, "PostThreadMessageW", W.BOOL, W.DWORD, W.UINT, W.WPARAM, W.LPARAM)(self.thread_id, 0x0012, 0, 0)

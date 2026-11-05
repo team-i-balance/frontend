@@ -52,3 +52,9 @@ def fix_josa(word: str, text: str, pos: int) -> tuple[str, int]:
                 want = with_b if bat else without_b
             return (want, len(cand)) if want != cand else ("", 0)
     return ("", 0)
+
+
+def ro(word: str) -> str:
+    """'으로'/'로': 받침이 없거나 ㄹ 받침이면 '로' ([전화번호_1]로, [이름_3]으로)."""
+    batchim, rieul = final_sound(word)
+    return "으로" if batchim and not rieul else "로"

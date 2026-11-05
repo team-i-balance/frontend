@@ -44,7 +44,7 @@ class Tray:
 
     def refresh(self):
         if self.item is not None:
-            label = {'on': 'KP ●', 'paused': 'KP ◐', 'off': 'KP ○'}[self.app.state()]
+            label = {'on': '누리 ●', 'paused': '누리 ◐', 'off': '누리 ○'}[self.app.state()]
             self.item.button().setTitle_(label)
 
     def notify(self, message):

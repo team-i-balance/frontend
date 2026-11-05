@@ -11,7 +11,7 @@ from agent.browser.actions import BrowserActions, ChipError
 from agent.browser.bridge import BrowserBridge
 from agent.browser.peer import Peer
 from agent.cli import Composer, Provider, stable_ranges
-from agent.server.client import DecideResult, ProcessResult, RestoreResult, ServerError
+from agent.server.client import ProcessResult, ServerError
 
 
 class FixtureApp:
@@ -67,36 +67,6 @@ class LiveTests(unittest.TestCase):
             self.actions.handle(req)
         self.app.server.preview.assert_not_called()
 
-    def test_select_decide_restore_once_isolated_by_tab(self):
-        text = "연락 010-2345-6789"
-        result = ProcessResult("w", "연락 [전화번호_1]", ["PHONE"], 1, "S", "low", 0, True)
-        self.app.server.process.return_value = result
-        self.app.server.decide.return_value = DecideResult(result.masked_text, True, None)
-        self.app.server.restore.return_value = RestoreResult(text, [], [])
-        work = self.actions.inspect("tab1", text)
-        self.assertEqual(work["choices"], ["[전화번호_1]"])
-        msg = {"action": "decide", "ticket": work["ticket"], "choice": "apply"}
-        with self.assertRaises(ChipError):
-            self.actions.handle({**msg, "channel": "tab2"})
-        preview = self.actions.handle(
-            {"action": "selection", "ticket": work["ticket"], "channel": "tab1", "keep": ["[전화번호_1]"]}
-        )
-        self.assertEqual(preview["text"], text)
-        self.app.server.decide.assert_not_called()
-        sent = self.actions.handle({**msg, "channel": "tab1"})
-        self.assertEqual(sent["text"], result.masked_text)
-        with self.assertRaises(ChipError):
-            self.actions.handle({**msg, "channel": "tab1"})
-        reply = {
-            "action": "restore",
-            "ticket": work["ticket"],
-            "channel": "tab1",
-            "text": "연락 [전화번호_1]",
-        }
-        self.assertEqual(self.actions.handle(reply)["text"], text)
-        with self.assertRaises(ChipError):
-            self.actions.handle(reply)
-
     def test_legacy_server_highlights_only_exact_ranges(self):
         app = self.app
         app.server.preview.side_effect = ServerError("missing", "expired", 404)
@@ -105,7 +75,7 @@ class LiveTests(unittest.TestCase):
         )
         for _ in range(2):
             result = self.actions.preview("연락 010-2345-6789")
-            self.assertEqual(result["spans"], [{"start": 3, "end": 16, "label": "전화번호"}])
+            self.assertEqual(result["spans"], [{"start": 3, "end": 16, "label": "전화번호", "keep": True}])
         self.assertEqual(app.server.preview.call_count, 1)
         app.server.process.return_value.masked_text = "[이름_1][이름_2]"
         app.server.process.return_value.detected_count = 2
@@ -200,7 +170,9 @@ class LiveCliLoopTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TerminalInputTests(unittest.IsolatedAsyncioTestCase):
-    async def test_keyboard_opens_chip_and_escape_preserves_highlights(self):
+    """보호된 CLI 입력창: 하이라이트가 남으면 Enter를 막고 칩을 연다. 칩은 숫자·Enter·Esc로 고른다."""
+
+    async def run_cli(self, script):
         from prompt_toolkit.application import create_app_session
         from prompt_toolkit.input import create_pipe_input
         from prompt_toolkit.output import DummyOutput
@@ -221,23 +193,51 @@ class TerminalInputTests(unittest.IsolatedAsyncioTestCase):
 
         with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
             cli = Composer(peer, "codex")
+            cli.app.ttimeoutlen = 0.05
             task = asyncio.create_task(cli.app.run_async())
             try:
-                inp.send_text("연락 010-2345-6789")
-                await until(lambda: cli.spans)
-                self.assertIsNone(cli.selected)
-                inp.send_bytes(b"\x1bOQ")  # F2
-                await until(lambda: cli.selected)
-                before = cli.spans.copy()
-                cli.app.ttimeoutlen = 0.05
-                inp.send_bytes(b"\x1b")
-                await until(lambda: not cli.selected)
-                self.assertEqual(cli.spans, before)
-                inp.send_bytes(b"\x1bOR")  # F3
-                await until(lambda: "010-2345-6789" not in cli.text and cli.checked == cli.revision)
-                inp.send_bytes(b"\r")
-                self.assertEqual(await asyncio.wait_for(task, 3), cli.text)
+                await script(cli, inp, until)
+                return await asyncio.wait_for(task, 3)
             finally:
                 if not task.done():
                     cli.app.exit(result=None)
                     await task
+
+    async def test_enter_is_blocked_and_mask_edits_only_the_value(self):
+        async def script(cli, inp, until):
+            inp.send_text("연락 010-2345-6789 부탁")
+            await until(lambda: cli.spans and cli.checked == cli.revision)
+            inp.send_bytes(b"\r")  # 하이라이트가 있으면 보내지 않고 칩을 연다
+            await until(lambda: cli.chip)
+            self.assertEqual([c[0] for c in cli.chip["chips"]], ["mask", "keep"])
+            self.assertIn("보내기 전에", cli.chip["note"])
+            inp.send_text("1")  # 마스킹
+            await until(lambda: cli.chip.get("chips") and cli.chip["chips"][0][0] == "apply" and cli.chip["chips"][0][2])
+            self.assertTrue(cli.chip["word"])
+            inp.send_bytes(b"\r")  # 고른 칩(적용)
+            await until(lambda: "010-2345-6789" not in cli.text)
+            self.assertTrue(cli.text.startswith("연락 ") and cli.text.endswith(" 부탁"))
+            self.assertEqual([c[0] for c in cli.chip["chips"]], ["undo"])
+            await until(lambda: cli.checked == cli.revision and not cli.spans)
+            inp.send_bytes(b"\x1b")
+            await until(lambda: cli.chip is None)
+            inp.send_bytes(b"\r")
+
+        sent = await self.run_cli(script)
+        self.assertNotIn("010-2345-6789", sent)
+
+    async def test_keep_needs_a_reason_then_sends_the_original(self):
+        async def script(cli, inp, until):
+            inp.send_text("연락 010-2345-6789")
+            await until(lambda: cli.spans and cli.checked == cli.revision)
+            inp.send_bytes(b"\x1bOQ")  # F2
+            await until(lambda: cli.chip)
+            inp.send_text("2")  # 원문유지
+            await until(lambda: [c[1] for c in cli.chip["chips"]] == ["업무상 필요", "오탐", "승인된 개인정보"])
+            inp.send_text("1")
+            await until(lambda: not cli.spans and cli.chip and cli.chip.get("done"))
+            inp.send_bytes(b"\x1b")
+            await until(lambda: cli.chip is None)
+            inp.send_bytes(b"\r")
+
+        self.assertEqual(await self.run_cli(script), "연락 010-2345-6789")

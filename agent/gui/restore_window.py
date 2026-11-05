@@ -39,7 +39,7 @@ class RestoreWindow(tk.Toplevel):
         self.app = app
         self._job = None
         self.result = ""
-        theme.window(self, "답변 복원 — KP Guard", 1080, 680, 820, 520)
+        theme.window(self, f"답변 복원 — {theme.APP_TITLE}", 1080, 680, 820, 520)
         self.protocol("WM_DELETE_WINDOW", self._close)
         build_restore_layout(self, "AI 답변 (가짜 값 포함)",
                              "매핑은 이 PC 메모리에만 있어요. 앱을 끄거나 '매핑 초기화'를 누르면 사라져요")

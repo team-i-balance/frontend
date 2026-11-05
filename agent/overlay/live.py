@@ -47,6 +47,19 @@ class LiveRanges:
             self.condition.notify()
             return list(self.spans)
 
+    def refresh(self):
+        """같은 글을 다시 검사한다 (원문유지를 되돌렸을 때 등)."""
+        with self.condition:
+            self.checked = None
+            self.condition.notify()
+
+    def drop(self, value):
+        """그 값의 하이라이트를 바로 지우고 다시 검사한다 (원문유지를 고른 뒤)."""
+        with self.condition:
+            self.spans = [s for s in self.spans if self.text[s["start"]:s["end"]] != value]
+            self.checked = None
+            self.condition.notify()
+
     def close(self):
         with self.condition:
             self.closed = True
@@ -69,9 +82,9 @@ class LiveRanges:
                 )
                 if self.closed:
                     return
-                text, epoch = self.text, self.epoch
+                text, epoch, key = self.text, self.epoch, self.key
             try:
-                spans = self.preview(text)["spans"]
+                spans = self.preview(text, key)["spans"]
             except Exception:  # Network/permissions can recover while the same draft remains open.
                 with self.condition:
                     if epoch == self.epoch:

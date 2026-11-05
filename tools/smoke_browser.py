@@ -5,6 +5,7 @@ The fixture never contacts ChatGPT, Claude or a production team server.
 """
 
 import argparse
+import re
 import secrets
 import sys
 from contextlib import ExitStack
@@ -12,7 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -40,7 +41,8 @@ class FixtureBackend(FakeBackend):
 
 
 class Desktop:
-    def __init__(self, url):
+    def __init__(self, url, backend=None):
+        self.backend = backend
         self.server = ServerClient(url, dev_token=True)
         self.base, self.ignore = config.load_base(), set()
         self.server.health()
@@ -54,9 +56,9 @@ class Desktop:
 
 
 class SeenActions(BrowserActions):
-    def preview(self, text):
+    def preview(self, text, channel=None):
         self.app.revisions.append(text)
-        return super().preview(text)
+        return super().preview(text, channel)
 
 
 def check_editor(context, peer, desktop, site, use_shell):
@@ -79,6 +81,7 @@ def check_editor(context, peer, desktop, site, use_shell):
         ),
     )
     if use_shell:
+        peer("reset")  # the shell shares one desktop channel across both sites
         page.expose_function(
             "fixtureMessage",
             lambda m: {
@@ -126,6 +129,36 @@ def check_editor(context, peer, desktop, site, use_shell):
         coords = cdp.send("DOM.getBoxModel", {"nodeId": node})["model"]["content"]
         page.mouse.click((coords[0] + coords[4]) / 2, (coords[1] + coords[5]) / 2)
 
+    def chips():
+        out = []
+        try:
+            for node_id in elements(".chip [data-chip]"):
+                attrs = cdp.send("DOM.getAttributes", {"nodeId": node_id})["attributes"]
+                out.append(dict(zip(attrs[::2], attrs[1::2]))["data-chip"])
+        except Error:  # the chip re-rendered between two CDP calls
+            return []
+        return out
+
+    def text_of(css):
+        try:
+            html = cdp.send("DOM.getOuterHTML", {"nodeId": wait_for(css)})["outerHTML"]
+        except Error:
+            return ""
+        return re.sub(r"<[^>]+>", "", html)
+
+    def current():
+        return field.input_value() if site == "chatgpt.com" else field.inner_text()
+
+    def until(test, what):
+        import time
+
+        end = time.monotonic() + 6
+        while time.monotonic() < end:
+            if test():
+                return
+            page.wait_for_timeout(30)
+        raise AssertionError(site + " " + what + "; value=" + repr(current()) + " chips=" + str(chips()))
+
     field = page.locator("textarea,.ProseMirror").first
     field.click()
     page.keyboard.insert_text("🧪 연락 ")
@@ -133,23 +166,42 @@ def check_editor(context, peer, desktop, site, use_shell):
     wait_for(".mark")
     assert len(desktop.revisions) > 1, "typing was not inspected until pause"
     assert not elements(".chip:not([hidden])")
-    click(".mark")
+    # 하이라이트가 남아 있으면 Enter(전송)를 막고 첫 항목의 칩을 연다
+    before = current()
+    page.keyboard.press("Enter")
     wait_for(".chip:not([hidden])")
+    assert current() == before, "Enter went through with a highlight"
+    assert chips() == ["mask", "keep"], chips()
     page.locator("#outside").click()
     assert not elements(".chip:not([hidden])")
     wait_for(".mark")
+    # 마스킹 → 바뀔 값만 → 적용: 입력창의 그 자리만 바뀐다
     click(".mark")
-    click(".chip .primary")
-    wait_for(".chip pre")
-    click(".chip .primary")
-    if site == "chatgpt.com":
-        page.wait_for_function("!document.querySelector('textarea').value.includes('010-')")
-        value = field.input_value()
-    else:
-        page.wait_for_function("!document.querySelector('.ProseMirror').innerText.includes('010-')")
-        value = field.inner_text()
-    assert "[전화번호_1]" in value, value
-    print(site, "typing / persistent highlight / click / apply passed", flush=True)
+    wait_for('.chip [data-chip="mask"]')
+    assert chips() == ["mask", "keep"], chips()
+    click('.chip [data-chip="mask"]')
+    until(lambda: "apply" in chips() and "[전화번호_1]" in text_of(".chip .word"), "masked word not shown")
+    click('.chip [data-chip="apply"]')
+    until(lambda: current().replace("\n", "") == "🧪 연락 [전화번호_1]", "value not edited in place")
+    wait_for('.chip [data-chip="undo"]')
+    until(lambda: not elements(".mark"), "highlight stayed after masking")
+    if desktop.backend:
+        until(lambda: any(d["action"] == "send_transformed" for d in desktop.backend.decisions), "decision not recorded")
+    # 원문유지 → 사유 셋
+    page.keyboard.insert_text(" 010-9876-5432")
+    wait_for(".mark")
+    click(".mark")
+    click('.chip [data-chip="keep"]')
+    until(lambda: chips() == ["back", "reason-business_need", "reason-false_positive", "reason-approved"], "reasons")
+    click('.chip [data-chip="reason-business_need"]')
+    until(lambda: not elements(".mark"), "kept value still highlighted")
+    wait_for('.chip [data-chip="undo"]')
+    if desktop.backend:
+        until(lambda: any(d["action"] == "send_as_is" and d["reason"] == "business_need"
+                          for d in desktop.backend.decisions), "keep not recorded")
+    page.keyboard.press("Enter")  # 하이라이트가 없으면 막지 않는다
+    until(lambda: "\n" in current().strip("\n") or current().endswith("\n"), "Enter blocked without highlights")
+    print(site, "typing / Enter blocked / mask in place / keep with reason passed", flush=True)
     page.close()
 
 
@@ -163,8 +215,9 @@ def main():
         parser.error("Use a loopback test server")
     key = secrets.token_urlsafe(32)
     with ExitStack() as stack:
-        url = args.server or stack.enter_context(FixtureBackend()).url
-        desktop = Desktop(url)
+        backend = None if args.server else stack.enter_context(FixtureBackend())
+        url = args.server or backend.url
+        desktop = Desktop(url, backend)
         bridge = BrowserBridge(key, SeenActions(desktop))
         bridge.start()
         stack.callback(bridge.stop)

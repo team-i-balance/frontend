@@ -150,6 +150,16 @@ class Snapshot:
     rectangles: (
         object  # Callable(start, end) -> visible screen rectangles; called on the provider thread only.
     )
+    # Callable(start, end, text) -> bool: replace draft[start:end] in the real editor as if typed.
+    # Provider thread only. The caller re-reads the editor to verify the result.
+    replace: object = None
+    bounds: tuple = ()  # visible editor rectangle (left, top, right, bottom)
+    focused: bool = True  # keyboard focus is in this editor (Enter goes to it)
+
+
+def end_only(draft, start, end):
+    """Terminal prompts have no addressable caret: only the last typed value can be retyped with Backspace."""
+    return end == len(draft.text) and "\n" not in draft.text[start:end]
 
 
 OWN_WINDOW = object()
