@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "KP Guard",
+  "version": "0.2.0",
+  "description": "ChatGPT·Claude의 프롬프트를 입력 중 검사하고 탐지된 단어에 작업을 표시합니다.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js", "scripts": ["background.js"] },
+  "action": { "default_popup": "connect.html", "default_title": "KP Guard 연결" },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "prompt-guard@ibalance.local",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": { "required": ["personallyIdentifyingInfo", "websiteContent"] }
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://claude.ai/*"],
+      "js": ["editor.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

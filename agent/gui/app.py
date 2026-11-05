@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -12,6 +13,9 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import messagebox
 
+from ..browser.actions import BrowserActions
+from ..browser.bridge import BrowserBridge
+from ..overlay.controller import NativeOverlay
 from .. import config
 from ..detect.model import ModelManager
 from ..detect.pipeline import detect
@@ -105,6 +109,11 @@ class App:
         if self.server_mode():
             self.check_server()
 
+        self.browser = None
+        self.browser_actions = BrowserActions(self)
+        self.overlay = NativeOverlay(self)
+        if self.settings.get("browser_key"):
+            self.start_browser()
         self.tray = tray.Tray(self) if tray.available() else None
         self.hotkeys = platform_api.HotkeyThread(HOTKEYS, lambda hid: self.post("hotkey", hid))
         self.hotkeys.start()
@@ -112,8 +121,13 @@ class App:
             self.tray.start()
 
         self.root.after(100, self._poll)
+        self.root.after(30_000, self._expire_browser_work)
         self.root.after(700, self._watch_clipboard)
         self.root.after(400, lambda: self._first_run(background))
+
+    def _expire_browser_work(self):
+        self.browser_actions.expire()
+        self.root.after(30_000, self._expire_browser_work)
 
     def run(self) -> None:
         self.root.mainloop()
@@ -132,6 +146,32 @@ class App:
 
     def save_settings(self) -> None:
         config.save_settings(self.settings)
+
+    def start_browser(self):
+        if self.browser is None:
+            try:
+                self.browser = BrowserBridge(self.settings["browser_key"], self.browser_actions)
+                self.browser.start()
+            except OSError:
+                self.browser = None
+                self.toast("브라우저 연결 포트를 열 수 없습니다. 실행 중인 KP Guard를 확인하세요.")
+        return self.browser is not None
+
+    def pair_browser(self):
+        if not self.settings.get("browser_key"):
+            self.settings["browser_key"] = secrets.token_urlsafe(32)
+            self.save_settings()
+        if self.start_browser():
+            self.copy_to_clipboard(self.settings["browser_key"])
+            self.toast("연결 코드를 복사했습니다. 브라우저의 KP Guard 확장에 붙여넣으세요.")
+
+    def disconnect_browser(self):
+        self.settings.pop("browser_key", None)
+        self.save_settings()
+        if self.browser:
+            self.browser.stop()
+            self.browser = None
+        self.toast("브라우저·CLI 연결을 해제했습니다.")
 
     def detector(self):
         """지금 쓸 수 있는 2단계 모델 (없으면 None → 규칙·사전만)."""
@@ -316,7 +356,17 @@ class App:
         self.root.after(100, self._poll)
 
     def _dispatch(self, cmd: str, *args) -> None:
-        if cmd == "review":
+        if cmd == "browser_detail":
+            self.open_review(args[0], "browser")
+        elif cmd == "browser_restore":
+            self.open_restore(args[0])
+        elif cmd == "server_tools":
+            if self.server_mode() and self.server:
+                from .server_tools import ServerToolsWindow
+                ServerToolsWindow(self)
+            else:
+                self.open_settings()
+        elif cmd == "review":
             self.open_review("", "manual")
         elif cmd == "restore":
             self.open_restore()
@@ -424,13 +474,13 @@ class App:
         self._last_seq = self._own_seq
 
     # ================================================================== 창 열기
-    def open_review(self, text: str = "", source: str = "manual", local: bool = False) -> None:
+    def open_review(self, text: str = "", source: str = "manual", local: bool = False, selected=None) -> None:
         """서버 처리 모드면 서버 점검 창, 아니면(또는 local=True면) 이 PC 엔진 점검 창."""
         if not text and self.reviews:  # 빈 창 요청이면 기존 창을 앞으로
             self.reviews[-1]._bring_front()
             return
         cls = ServerReviewWindow if self.server_mode() and not local else ReviewWindow
-        self.reviews.append(cls(self, text, source))
+        self.reviews.append(cls(self, text, source, selected=selected))
 
     def review_closed(self, win) -> None:
         if win in self.reviews:
@@ -511,9 +561,12 @@ class App:
             if self.settings_win:
                 self.settings_win.v_auto.set(autostart.is_enabled())
         if background and self.tray:
-            self.tray.notify("백그라운드에서 실행 중이에요. 프롬프트를 복사하면 자동으로 점검해요.")
+            self.tray.notify("ChatGPT·Claude 입력창에서 감지된 단어를 클릭해 점검할 수 있습니다.")
 
     def quit(self) -> None:
+        self.overlay.close()
+        if self.browser:
+            self.browser.stop()
         self.hotkeys.stop()
         if self.tray:
             self.tray.stop()

@@ -1,7 +1,7 @@
 # Build on macOS: python -m PyInstaller --noconfirm KPGuard-macos.spec
 from PyInstaller.utils.hooks import collect_submodules
 
-hidden = collect_submodules('pystray') + ['AppKit', 'Foundation', 'Quartz']
+hidden = collect_submodules('pystray') + ['AppKit', 'Foundation', 'Quartz', 'ApplicationServices', 'HIServices']
 a = Analysis(['kp_guard.pyw'], datas=[('agent/assets', 'agent/assets')], hiddenimports=hidden)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='KPGuard', console=False)

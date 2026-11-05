@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+  <meta charset="utf-8" /><title>KP Guard 연결</title>
+  <style>
+    body {
+      width: 280px;
+      margin: 18px;
+      font: 14px/1.55 system-ui;
+      color: #efeff3;
+      background: #202126;
+    }
+    h1 {
+      font-size: 18px;
+    }
+    label,
+    input {
+      display: block;
+    }
+    input,
+    button {
+      border-radius: 7px;
+      padding: 7px;
+      border: 1px solid #888;
+    }
+    input {
+      width: 94%;
+      margin: 6px 0 10px;
+    }
+    button {
+      cursor: pointer;
+    }
+    output {
+      display: block;
+      margin-top: 8px;
+    }
+  </style>
+  <h1>KP Guard 연결</h1>
+  <p>
+    PC 앱의 설정에서 ‘브라우저·CLI 연결 코드 복사’를 누릅니다. 연결하면 ChatGPT·Claude에서 작성 중인
+    프롬프트를 앱의 처리 위치로 실시간 검사합니다.
+  </p>
+  <form>
+    <label>PC 연결 코드<input type="password" autocomplete="off" required /></label><button>연결</button>
+    <button type="button" id="remove">해제</button>
+  </form>
+  <p><button id="restore">AI 답변 복원 열기</button> <button id="tools">서버 기능 전체</button></p>
+  <output role="status"></output>
+  <script src="connect.js"></script>
+</html>

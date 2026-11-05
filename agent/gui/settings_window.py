@@ -77,8 +77,18 @@ class SettingsWindow(tk.Toplevel):
             if not mac_clipboard.available():
                 detail = "클립보드 자동 점검을 사용할 수 없어요. macOS 의존성을 설치하거나 직접 입력하세요."
             theme.label(box.body, detail, "caption12", theme.TEXT_SECONDARY, wraplength=px(300)).pack(fill="x")
+        self.v_overlay = tk.BooleanVar(value=app.settings.get("native_overlay", True))
+        theme.Switch(box.body, "AI 입력창에 자동 하이라이트", self.v_overlay, self._toggle_overlay).pack(anchor="w")
+        self.overlay_status = theme.label(box.body, "", "caption12", theme.TEXT_SECONDARY)
+        self.overlay_status.pack(anchor="w", pady=(0, px(6)))
+        if __import__("sys").platform == "darwin":
+            theme.Button(box.body, "손쉬운 사용 권한 확인", self._overlay_access, size="sm").pack(anchor="w")
         self.btn_pause = theme.Button(box.body, "30분 일시정지", lambda: app.post("pause"), size="sm")
         self.btn_pause.pack(anchor="w")
+        connection = tk.Frame(box.body, bg=theme.BG_SURFACE)
+        connection.pack(anchor="w", pady=(px(8), 0))
+        theme.Button(connection, "브라우저·CLI 연결 코드 복사", app.pair_browser, size="sm").pack(side="left")
+        theme.Button(connection, "연결 해제", app.disconnect_browser, kind="ghost", size="sm").pack(side="left")
 
         # ---------------------------------------------------------------- 처리 위치
         pbox = theme.Card(col1, title="처리 위치", fit=True)
@@ -150,12 +160,12 @@ class SettingsWindow(tk.Toplevel):
             "트레이 아이콘을 쓰려면 pip install pystray pillow 후 다시 실행하세요. 이 창을 닫아도 백그라운드에서 계속 돌아가요."
         server = self.app.server
         if self.app.server_mode():
-            where = (f"점검 창을 열면 그 글을 팀 서버({server.base_url if server else '주소 없음'})로 보내 검사해요. "
-                     "복사만 하고 창을 열지 않은 글은 보내지 않아요.")
+            where = f"자동 하이라이트를 켜면 입력 중인 AI 프롬프트를 팀 서버({server.base_url if server else '주소 없음'})로 보내 검사합니다."
         else:
             where = "외부 네트워크 연결 없이 이 PC 안에서만 동작해요."
         self.sub.configure(text=f"{where} {tray}")
         self.v_monitor.set(self.app.settings["monitoring"])
+        self.overlay_status.configure(text=self.app.overlay.status)
         self.v_proc.set(self.app.settings.get("processing", "server"))
         status = self.app.server_status
         error = self.app.server_error
@@ -233,6 +243,18 @@ class SettingsWindow(tk.Toplevel):
     def _toggle_monitor(self) -> None:
         if self.v_monitor.get() != self.app.settings["monitoring"]:
             self.app.post("toggle")
+
+    def _toggle_overlay(self) -> None:
+        self.app.settings["native_overlay"] = self.v_overlay.get()
+        self.app.save_settings()
+        self.refresh()
+
+    def _overlay_access(self):
+        try:
+            from ..overlay.macos import request_access
+            request_access()
+        except ImportError:
+            self.app.toast("화면 연동 모듈을 설치한 후 다시 실행해 주세요.")
 
     def _toggle_clip(self) -> None:
         self.app.settings["clipboard_watch"] = self.v_clip.get()

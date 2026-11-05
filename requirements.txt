@@ -15,6 +15,13 @@ numpy>=1.24,<3
 onnxruntime>=1.17,<2
 tokenizers>=0.20,<1
 
+# Windows UI Automation (입력창의 단어 위치)
+uiautomation==2.0.29; sys_platform == "win32"
+
 # macOS 시스템 연동
+pyobjc-framework-ApplicationServices>=10,<13; sys_platform == "darwin"
 pyobjc-framework-Cocoa>=10,<13; sys_platform == "darwin"
 pyobjc-framework-Quartz>=10,<13; sys_platform == "darwin"
+
+# Claude Code / Codex CLI 실시간 입력창
+prompt-toolkit>=3.0.43,<4
