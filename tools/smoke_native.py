@@ -118,7 +118,9 @@ def main():
             )
 
         try:
-            browser = play.chromium.launch(channel="chrome", headless=False)
+            browser = play.chromium.launch(
+                channel=sys.argv[1] if len(sys.argv) > 1 else "chrome", headless=False
+            )
             ctx = browser.new_context(no_viewport=True)
             documents = {
                 "chatgpt.com": '<textarea id="prompt-textarea" aria-label="Message ChatGPT"></textarea>',

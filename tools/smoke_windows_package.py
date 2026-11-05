@@ -99,12 +99,28 @@ def check(path):
             while hwnd:
                 pid = W.DWORD()
                 win.pid_for(hwnd, ctypes.byref(pid))
-                if pid.value == app.pid and visible(hwnd):
+                if win.executable(pid.value) == path.name.lower() and visible(hwnd):
                     return True
                 hwnd = find(None, hwnd, "KPGuardTextMark", None)
             return False
 
-        wait_for(painted, "no visible native word mark from packaged executable")
+        # A first-run tray notification may have appeared while the executable loaded.
+        window.SetActive(waitTime=0)
+        try:
+            wait_for(painted, "no visible native word mark from packaged executable")
+        except AssertionError:
+            active, pid = win.foreground(), W.DWORD()
+            win.pid_for(active, ctypes.byref(pid))
+            print(
+                f"active={win.executable(pid.value)}, fixture={active == window.NativeWindowHandle}, received={len(previews)}",
+                flush=True,
+            )
+            with win.Reader() as reader:
+                source = reader.sample()
+                if isinstance(source, win.Snapshot) and source.draft.text == DRAFT:
+                    a = DRAFT.index("010")
+                    print(f"source bounds={list(source.rectangles(a, len(DRAFT)))}", flush=True)
+            raise
         assert app.poll() is None
         print(
             "Packaged executable: Windows console composer -> fixture server -> native visible mark passed."
