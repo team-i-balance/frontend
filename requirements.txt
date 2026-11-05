@@ -16,3 +16,4 @@ onnxruntime>=1.17,<2
 tokenizers>=0.20,<1
 
 pyobjc-framework-Cocoa>=10,<13; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10,<13; sys_platform == "darwin"

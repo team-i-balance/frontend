@@ -156,10 +156,12 @@ class SettingsWindow(tk.Toplevel):
         self.btn_model.configure(text="모델 켜기" if not self.app.settings.get("model_enabled", True) else "모델 끄기")
         hk = self.app.hotkeys
         info = "단축키: Ctrl+Alt+P 점검 · Ctrl+Alt+R 복원 · Ctrl+Alt+F 파일 · Ctrl+Alt+O 설정"
+        if __import__("sys").platform == "darwin":
+            info = info.replace("Ctrl+Alt", "⌘+⌥")
         if not hk.registered and not hk.failed:
             info += " (등록 대기 중)"
         if hk.failed:
-            info += f"\n다른 프로그램이 쓰고 있어 못 쓰는 단축키: {', '.join(hk.failed)}"
+            info += f"\n단축키를 사용할 수 없어요: {', '.join(hk.failed)}. macOS 입력 모니터링 권한을 확인하세요."
         self.hotkey_info.configure(text=info)
         st = self.app.log.stats()
         lines = [f"{label}  {st['queues'].get(q, 0)}건" for q, label in QUEUE_LABELS.items()]
