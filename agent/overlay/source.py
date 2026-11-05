@@ -154,6 +154,7 @@ class Snapshot:
     # Provider thread only. The caller re-reads the editor to verify the result.
     replace: object = None
     bounds: tuple = ()  # visible editor rectangle (left, top, right, bottom)
+    focused: bool = True  # keyboard focus is in this editor (Enter goes to it)
 
 
 def end_only(draft, start, end):

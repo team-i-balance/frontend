@@ -101,6 +101,7 @@ class OverlayChipTests(unittest.TestCase):
             "w1", sent.replace(PHONE, "[전화번호_1]"), ["PHONE"], 1, "S", "high", 0, False)
         self.server.decide.return_value = DecideResult(None, True, "pre_warning")
         self.overlay = NativeOverlay(self.app)
+        self.live = self.overlay.live
         # Windows·macOS start the real reader thread, ticker and Enter guard. These tests drive the chip directly.
         self.overlay.stop.set()
         self.addCleanup(self.stop_overlay)
@@ -111,7 +112,7 @@ class OverlayChipTests(unittest.TestCase):
 
     def stop_overlay(self):
         overlay = self.overlay
-        overlay.live.close()
+        self.live.close()
         if overlay.guard is not None:
             overlay.guard.stop()
         if hasattr(overlay, "timer"):
@@ -177,6 +178,31 @@ class OverlayChipTests(unittest.TestCase):
         self.assertEqual(self.overlay.chip.chip_labels(), ["마스킹", "원문유지"])
         self.assertTrue(any("보내기 전에" in t for t in self.overlay.chip.texts()))
         self.assertEqual(frame.spans[0][2], "전화번호")
+
+    def test_enter_is_guarded_only_while_typing_in_the_composer(self):
+        text = f"고객 {PHONE}"
+        span = {"start": 3, "end": 16, "label": "전화번호", "keep": True}
+
+        class Reader:
+            reason = "test"
+
+            def __init__(self, focused):
+                self.focused = focused
+
+            def sample(self):
+                return Snapshot(KEY, Draft.plain(text), lambda a, b: [], None, (), self.focused)
+
+            def reset(self):
+                pass
+
+        self.overlay.live = Mock(update=lambda key, text="": [span], error=False)
+        self.overlay._sample(Reader(False))  # 주소창 등 다른 곳에 커서: Enter를 막지 않는다
+        self.assertIsNone(self.overlay.target)
+        self.overlay._sample(Reader(True))
+        self.assertEqual(self.overlay.target, KEY[0])
+        self.overlay.live = Mock(update=lambda key, text="": [], error=False)
+        self.overlay._sample(Reader(True))  # 하이라이트가 없어지면 막지 않는다
+        self.assertIsNone(self.overlay.target)
 
     def test_terminal_only_retypes_the_last_value(self):
         draft = Draft.plain(f"연락 {PHONE}")

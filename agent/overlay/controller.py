@@ -170,7 +170,8 @@ class NativeOverlay:
         key = (source.key, self.app.server_mode(), id(self.app.server), self.app.browser_actions.generation)
         spans = self.live.update(key, text)
         self.frame = make_frame(source, spans)
-        self.target = source.key[0] if spans else None
+        # Enter(전송)는 하이라이트가 남은 그 입력창에 커서가 있을 때만 막는다 (주소창 등의 Enter는 그대로)
+        self.target = source.key[0] if spans and source.focused else None
         self.status = "검사 연결을 확인해 주세요." if self.live.error else "입력 중 실시간 검사"
         return 0.04
 

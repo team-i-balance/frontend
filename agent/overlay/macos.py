@@ -200,8 +200,10 @@ class Reader:
             return None
 
         docs = [n for n, role in chain if role == "AXWebArea"]
+        typing = False  # Enter is guarded only while the keyboard focus is in the composer itself
         if docs:
             field = next((n for n, role in chain if is_editor(n, role)), None)
+            typing = field is not None
             if field is not None:
                 urls = [web_url(doc) for doc in docs]
                 if not all(site(url) and site(url) == site(urls[0]) for url in urls):
@@ -228,11 +230,11 @@ class Reader:
                 return None
         raw = attribute(field, "AXValue")
         if isinstance(raw, str) and len(raw) <= MAX_TEXT:
-            return self.snapshot(pid, site(url), window, field, raw, 0, Draft.plain(raw), url)
+            return self.snapshot(pid, site(url), window, field, raw, 0, Draft.plain(raw), url, typing)
         return None
 
     @staticmethod
-    def snapshot(pid, kind, window, field, raw, base, draft, url=""):
+    def snapshot(pid, kind, window, field, raw, base, draft, url="", focused=True):
         viewport = clip(boundary(field), boundary(window))
 
         offsets = None
@@ -273,7 +275,7 @@ class Reader:
             return type_text(new) if new else press(51)
 
         bounds = viewport or ()
-        return Snapshot((pid, kind, CFHash(window), CFHash(field), url), draft, ranges, replace, bounds)
+        return Snapshot((pid, kind, CFHash(window), CFHash(field), url), draft, ranges, replace, bounds, focused)
 
 
 class Paint:

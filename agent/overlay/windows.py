@@ -400,6 +400,7 @@ class Reader:
             return None
 
         docs = [n for n in lineage if n.ControlTypeName == "DocumentControl"]
+        in_focus = bool(docs)  # the keyboard focus is inside the page (not the address bar or other chrome)
         # After clicking page chrome the focused UIA element often belongs to the address bar.
         # Resolve the page under the foreground window and keep scanning its original composer.
         if not docs:
@@ -417,6 +418,8 @@ class Reader:
         url = urls[0]
         doc_id = tuple(doc.GetRuntimeId())
         candidate = next((n for n in lineage[: lineage.index(doc)] if is_editor(n)), None)
+        # Enter is guarded only while the keyboard focus is in the composer itself.
+        typing = in_focus and candidate is not None
         cache_key = hwnd, url, doc_id
         if candidate is None and self.saved and self.saved[0] == cache_key:
             previous = self.saved[1]
@@ -435,11 +438,11 @@ class Reader:
         if view:
             raw = view.GetText(MAX_TEXT + 1)
             if len(raw) <= MAX_TEXT:
-                return self.snapshot(hwnd, site(url), field, view, raw, Draft.plain(raw), url)
+                return self.snapshot(hwnd, site(url), field, view, raw, Draft.plain(raw), url, typing)
         return None
 
     @staticmethod
-    def snapshot(hwnd, kind, field, view, raw, draft, url=""):
+    def snapshot(hwnd, kind, field, view, raw, draft, url="", focused=True):
         viewport = rect(field.BoundingRectangle)
         if kind == "cli" and (viewport[2] <= viewport[0] or viewport[3] <= viewport[1]):
             area = W.RECT()
@@ -483,7 +486,7 @@ class Reader:
             time.sleep(0.03)
             return type_text(new) if new else press(0x08)
 
-        return Snapshot((hwnd, kind, tuple(field.GetRuntimeId()), url), draft, ranges, replace, viewport)
+        return Snapshot((hwnd, kind, tuple(field.GetRuntimeId()), url), draft, ranges, replace, viewport, focused)
 
 
 class WNDCLASS(C.Structure):
