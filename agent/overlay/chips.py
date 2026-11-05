@@ -19,20 +19,19 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 # ---------------------------------------------------------------- look (independent of gui.theme)
-INK = (15, 17, 24)
-EDGE = (46, 51, 68)
-TEXT = (236, 238, 245)
-DIM = (140, 148, 168)
-VIOLET = (124, 108, 255)
-SKY = (56, 189, 248)
-LINK = (160, 146, 255)
-HOVER = (29, 32, 45)
-CHOSEN = (42, 36, 88)
-FLASH = (88, 74, 178)
-BADGE = (31, 34, 48)
+INK = (44, 46, 52)        # card
+EDGE = (78, 81, 90)       # 1px outline
+TEXT = (236, 237, 240)
+DIM = (150, 153, 162)
+BLUE = (59, 130, 246)     # active card, chosen row, lines
+LINK = BLUE
+HOVER = (56, 59, 67)
+CHOSEN = (40, 52, 76)     # blue-tinted slate
+FLASH = (52, 74, 120)
+BADGE = (108, 112, 122)   # outlined number box
 
 # Sizes at 96 DPI.
 HEAD, ROW, PAD, RADIUS = 42, 36, 6, 12
@@ -132,6 +131,7 @@ class Card:
         self.menu, self.s, self.depth, self.born = menu, s, depth, born
         self.dying = None
         self.selected = None
+        self.active = True
         n = len(menu.options)
         self.hover = [0.0] * n
         self.flash = [0.0] * n
@@ -153,6 +153,7 @@ class Card:
         self.h = self.head + self.pad * 2 + self.row * n
         self.margin = S(SHADOW)
         self.base = self._base()
+        self.base_active = self._outlined(self.base)
 
     def px(self, v):
         return max(1, round(v * self.s))
@@ -173,12 +174,6 @@ class Card:
         c, r = x + self.w - self.px(22), self.px(11)
         return c - r, y + self.head // 2 - r, c + r, y + self.head // 2 + r
 
-    def _gradient(self, w, h):
-        line = Image.new("RGB", (w, 1))
-        for x in range(w):
-            line.putpixel((x, 0), mix(VIOLET, SKY, x / max(1, w - 1)))
-        return line.resize((w, h))
-
     def _base(self):
         """Shadow, body, border and header with title: drawn once, anti-aliased."""
         w, h, m, S = self.w, self.h, self.margin, self.px
@@ -192,16 +187,13 @@ class Card:
         body = Image.new("RGBA", (w, h), EDGE + (255,))
         inner = rounded_mask((w - 2, h - 2), S(RADIUS) - 1)
         body.paste(INK + (255,), (1, 1), inner)
-        head = self._gradient(w - 2, self.head - 1).convert("RGBA")
-        clip = Image.new("L", (w - 2, self.head - 1), 0)
-        clip.paste(inner.crop((0, 0, w - 2, self.head - 1)), (0, 0))
-        body.paste(head, (1, 1), clip)
+        ImageDraw.Draw(body).line([(S(12), self.head), (w - S(12), self.head)], fill=EDGE + (255,), width=1)
         body.putalpha(mask)
         img.alpha_composite(body, (m, m))
         d = ImageDraw.Draw(img)
         tx, ty = m + S(14), m + self.head // 2
         title = fit(self.menu.title, self.f_title, w - S(40) - (S(26) if self.depth == 0 else 0))
-        d.text((tx, ty), title, font=self.f_title, fill=(255, 255, 255, 255), anchor="lm")
+        d.text((tx, ty), title, font=self.f_title, fill=TEXT + (255,), anchor="lm")
         if self.menu.note:
             face = self.f_mono if self.menu.note.isascii() else self.f_row
             nx = tx + self.f_title.getlength(title) + S(10)
@@ -210,10 +202,24 @@ class Card:
             if room > S(30):
                 pill = Image.new("RGBA", (int(face.getlength(note) + S(16)), S(20)), (0, 0, 0, 0))
                 ImageDraw.Draw(pill).rounded_rectangle(
-                    (0, 0, pill.width - 1, pill.height - 1), S(10), fill=(10, 12, 30, 90)
+                    (0, 0, pill.width - 1, pill.height - 1), S(10), fill=(64, 67, 76, 255)
                 )
                 img.alpha_composite(pill, (int(nx), ty - pill.height // 2))
-                d.text((nx + S(8), ty), note, font=face, fill=(255, 255, 255, 235), anchor="lm")
+                d.text((nx + S(8), ty), note, font=face, fill=DIM + (255,), anchor="lm")
+        return img
+
+    def _outlined(self, base):
+        """Same card with a 2px blue outline: the chip waiting for a choice."""
+        img = base.copy()
+        w, h, m, S = self.w, self.h, self.margin, self.px
+        ring = rounded_mask((w, h), S(RADIUS))
+        hole = Image.new("L", (w, h), 0)
+        t = max(2, S(2))
+        hole.paste(rounded_mask((w - 2 * t, h - 2 * t), S(RADIUS) - t), (t, t))
+        edge = ImageChops.subtract(ring, hole)
+        layer = Image.new("RGBA", (w, h), BLUE + (255,))
+        layer.putalpha(edge)
+        img.alpha_composite(layer, (m, m))
         return img
 
     def opacity(self, now):
@@ -227,7 +233,7 @@ class Card:
 
     def render(self, now):
         """The card at its own size plus shadow margin."""
-        img = self.base.copy()
+        img = (self.base_active if self.active else self.base).copy()
         d = ImageDraw.Draw(img)
         S, m = self.px, self.margin
         opened = (now - self.born - 0.08) / OPEN_S
@@ -241,29 +247,32 @@ class Card:
             fill = mix(fill, CHOSEN, chosen)
             fill = mix(fill, FLASH, self.flash[i])
             fill = mix(INK, fill, appear)
-            if fill != INK:
-                d.rounded_rectangle((x0, y0 + 1, x1 - 1, y1 - 2), S(8), fill=fill + (255,))
-            if lit > 0.02:
-                bar = max(1, round(S(3) * lit))
+            if fill != INK or chosen:
                 d.rounded_rectangle(
-                    (x0 + S(2), y0 + S(9), x0 + S(2) + bar, y1 - S(10)), S(2), fill=mix(INK, VIOLET, lit * appear) + (255,)
+                    (x0, y0 + 1, x1 - 1, y1 - 2),
+                    S(8),
+                    fill=fill + (255,),
+                    outline=(mix(INK, BLUE, appear) + (255,)) if chosen else None,
+                    width=max(1, S(1.5)),
                 )
             bx = x0 + S(12) + slide
             cy = (y0 + y1) // 2
-            badge = mix(BADGE, VIOLET, chosen)
-            d.rounded_rectangle((bx, cy - S(9), bx + S(24), cy + S(9)), S(5), fill=mix(INK, badge, appear) + (255,))
+            badge = mix(BADGE, BLUE, chosen)
+            d.rounded_rectangle(
+                (bx, cy - S(9), bx + S(20), cy + S(9)), S(4), outline=mix(INK, badge, appear) + (255,), width=1
+            )
             d.text(
-                (bx + S(12), cy),
-                f"{i + 1:02d}",
+                (bx + S(10), cy),
+                f"{i + 1}",
                 font=self.f_badge,
-                fill=mix(INK, (255, 255, 255) if chosen else DIM, appear) + (255,),
+                fill=mix(INK, mix(DIM, BLUE, chosen), appear) + (255,),
                 anchor="mm",
             )
             label = fit(option.label, self.f_row, x1 - bx - S(34 + 30))
             color = mix(mix(TEXT, (255, 255, 255), lit), INK, 1 - appear)
             d.text((bx + S(34), cy), label, font=self.f_row, fill=color + (255,), anchor="lm")
             gx = x1 - S(16) + round(S(3) * self.hover[i]) + slide
-            glyph = mix(INK, mix(DIM, LINK, lit), appear) + (255,)
+            glyph = mix(INK, mix(DIM, BLUE if chosen else TEXT, lit), appear) + (255,)
             if option.menu is not None:  # opens another chip
                 d.line([(gx - S(3), cy - S(5)), (gx + S(2), cy), (gx - S(3), cy + S(5))], fill=glyph, width=S(2), joint="curve")
             else:  # final choice
@@ -272,15 +281,11 @@ class Card:
         if self.depth == 0:
             x0, y0, x1, y1 = self.close_box(m, m)
             if self.close_hover > 0.02:
-                ring = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
-                ImageDraw.Draw(ring).ellipse(
-                    (0, 0, ring.width - 1, ring.height - 1), fill=(255, 255, 255, round(60 * self.close_hover))
-                )
-                img.alpha_composite(ring, (x0, y0))
+                d.ellipse((x0, y0, x1, y1), fill=mix(INK, HOVER, self.close_hover) + (255,))
             c, r = (x0 + x1) // 2, S(4)
             cy = (y0 + y1) // 2
             for a, b in (((c - r, cy - r), (c + r, cy + r)), ((c - r, cy + r), (c + r, cy - r))):
-                d.line([a, b], fill=(255, 255, 255, 230), width=S(2))
+                d.line([a, b], fill=mix(DIM, TEXT, self.close_hover) + (255,), width=S(2))
         return img
 
 
@@ -457,6 +462,9 @@ class Cascade:
             card.close_hover = approach(card.close_hover, 1.0 if live and hit == ("close",) else 0.0, dt, 0.05)
         for parent, card in zip([None] + self.cards, self.cards):
             self._wire(card, parent)
+            card.active = card is self.cards[-1] and self.closing is None
+        for card in self.leaving:
+            card.active = False
         self.leaving = [c for c in self.leaving if not c.done(now)]
         if self.closing is not None and now - self.closing >= CLOSE_S + 0.04 and not self.finished:
             self.finished = True
