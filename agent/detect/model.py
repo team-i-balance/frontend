@@ -3,7 +3,9 @@
 팀 backend 레포 `local_ai/detector.py`의 추론과 BIO 라벨 해석을 가져와 앱의 Span으로 바꾼다.
 
 - 모델 파일은 레포와 exe에 들어 있지 않다. 사용자가 지정한 로컬 폴더에서만 읽고, 실행 중에 내려받지 않는다.
-- 네트워크를 쓰지 않는다. onnxruntime 텔레메트리도 끈다.
+- 네트워크를 쓰지 않는다. onnxruntime에는 마이크로소프트 원격 수집(1DS, mobile.events.data.microsoft.com)이
+  들어 있고, 1.31.1에서 확인해 보니 disable_telemetry_events()만으로는 추론 중 연결 시도가 계속됐다.
+  ORT_DISABLE_TELEMETRY=1을 onnxruntime을 불러오기 전에 넣으면 시도가 사라진다 (2026-11-05 측정).
 - 추론이 실패하면 ModelError를 낸다. 호출하는 쪽(pipeline)은 모델 결과를 버리고 '모델 검사 실패'를 알린다.
   규칙 결과만으로 완전한 검사처럼 보이게 하지 않는다.
 - 원문은 메모리에서만 다룬다. 같은 글을 다시 검사하지 않도록 최근 결과 몇 개만 메모리에 둔다(키는 해시).
@@ -12,12 +14,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from collections import OrderedDict
 from pathlib import Path
 
 from ..sanitize.josa import final_sound
 from .span import Span
+
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")  # onnxruntime을 import하기 전에 (아래 AegisModel에서 지연 import)
 
 NAME = "AEGIS"
 MODEL_FILES = ("model.onnx", "model_quantized.onnx", "onnx/model_quantized.onnx")

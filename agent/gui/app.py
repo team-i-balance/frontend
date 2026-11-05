@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import queue
+import threading
 import time
 import tkinter as tk
+from dataclasses import dataclass
 from tkinter import messagebox
 
 from .. import config
@@ -16,12 +18,14 @@ from ..detect.scoring import AUTO_APPLY
 from ..events.log import EventLog
 from ..sanitize.engine import Session
 from ..sanitize.restore import restore
+from ..server.client import WORK_TTL_SECONDS, ServerClient, ServerError
 from ..system import autostart, win32
 from . import theme, tray
 from .file_window import FileWindow
 from .restore_window import RestoreWindow
 from .review import ReviewWindow
 from .samples import SAMPLES
+from .server_review import ServerRestoreWindow, ServerReviewWindow
 from .settings_window import SettingsWindow
 
 HOTKEYS = {
@@ -35,6 +39,20 @@ MAX_CLIP_LEN = 50_000
 # 복사할 때마다 도는 자동 점검은 짧은 글에만 모델을 쓴다 (메인 스레드를 오래 잡지 않게).
 # 긴 글은 규칙·사전으로 창을 띄울지 정하고, 창을 직접 열면 모델로 다시 검사한다.
 CLIP_MODEL_MAX_CHARS = 2000
+
+
+@dataclass
+class ServerWork:
+    """마지막으로 보낸 변환문의 서버 작업. 서버는 /process 시점부터 10분 동안만 보관하고, 복원은 한 번만 된다."""
+    work_id: str
+    tokens: frozenset
+    processed_at: float
+
+    def expires_in(self) -> float:
+        return WORK_TTL_SECONDS - (time.time() - self.processed_at)
+
+    def alive(self) -> bool:
+        return self.expires_in() > 0
 
 
 class App:
@@ -63,6 +81,14 @@ class App:
         self.models = ModelManager(on_change=lambda: self.post("model_state"))
         self._announce_model = False
         self.models.configure(config.model_dir(self.settings), self.settings["model_threads"])
+
+        # 서버 처리: 탐지·가명화·기록·복원은 팀 서버(backend /process)가 한다
+        self.server: ServerClient | None = None
+        self.server_work: ServerWork | None = None
+        self.server_status = "확인 전"
+        self._setup_server()
+        if self.server_mode():
+            self.check_server()
 
         self.tray = tray.Tray(self) if tray.available() else None
         self.hotkeys = win32.HotkeyThread(HOTKEYS, lambda hid: self.post("hotkey", hid))
@@ -95,6 +121,74 @@ class App:
     def detector(self):
         """지금 쓸 수 있는 2단계 모델 (없으면 None → 규칙·사전만)."""
         return self.models.detector()
+
+    # ================================================================== 서버 처리
+    def _setup_server(self) -> None:
+        url = config.server_url(self.settings)
+        try:
+            self.server = ServerClient(url, float(self.settings["server_timeout"])) if url else None
+        except ValueError:
+            self.server = None
+        self.server_work = None
+        self.server_status = "확인 전" if self.server else "서버 주소가 올바르지 않아요"
+
+    def server_mode(self) -> bool:
+        return self.settings.get("processing") == "server"
+
+    def set_server(self, processing: str, url: str | None = None) -> None:
+        """설정 창에서 처리 위치나 서버 주소를 바꿀 때."""
+        self.settings["processing"] = processing
+        if url is not None:
+            self.settings["server_url"] = url.strip()
+        self.save_settings()
+        self._setup_server()
+        self._state_changed()
+        if processing == "server":
+            self.check_server()
+
+    def check_server(self) -> None:
+        """연결 확인 (작업 스레드). 원문은 보내지 않는다."""
+        server = self.server
+        if server is None:
+            self.post("server_health", "서버 주소가 올바르지 않아요")
+            return
+        self.server_status = "확인 중…"
+
+        def work():
+            try:
+                status = "연결됨" if server.health() else "응답이 이상해요"
+            except ServerError as exc:
+                status = exc.message
+            self.post("server_health", status)
+
+        threading.Thread(target=work, daemon=True, name="server-health").start()
+
+    def server_decide(self, result, action: str, reason: str | None = None, retry_text: str | None = None,
+                      tokens=frozenset()) -> None:
+        """사용자 선택을 서버에 기록한다 (작업 스레드). 작업이 만료됐으면 같은 글로 한 번 다시 검사해 기록한다."""
+        server = self.server
+        if server is None or result is None:
+            return
+
+        def work():
+            work_id, processed_at = result.work_id, result.received_at
+            try:
+                try:
+                    out = server.decide(work_id, action, reason)
+                except ServerError as exc:
+                    if exc.kind != "expired" or retry_text is None:
+                        raise
+                    again = server.process(retry_text)
+                    work_id, processed_at = again.work_id, again.received_at
+                    out = server.decide(work_id, action, reason)
+            except ServerError as exc:
+                if action != "cancel":
+                    self.post("server_decided", None, exc.message)
+                return
+            if out.restore_available and tokens:
+                self.post("server_decided", ServerWork(work_id, frozenset(tokens), processed_at), None)
+
+        threading.Thread(target=work, daemon=True, name="server-decide").start()
 
     def set_model(self, folder: str | None = None, enabled: bool = True) -> None:
         """설정 창에서 모델 폴더를 고르거나 끌 때."""
@@ -156,6 +250,15 @@ class App:
              4: self.open_files}[args[0]]()
         elif cmd == "model_state":
             self._model_state_changed()
+        elif cmd == "server_health":
+            self.server_status = args[0]
+            self._state_changed()
+        elif cmd == "server_decided":
+            work, error = args
+            if work is not None:
+                self.server_work = work
+            if error:
+                self.toast(f"서버 기록에 실패했어요. {error}")
         elif cmd == "quit":
             self.quit()
 
@@ -196,11 +299,17 @@ class App:
     def _inspect_clipboard(self, text: str) -> None:
         if not self.settings["min_length"] <= len(text) <= MAX_CLIP_LEN:
             return
-        # AI 답변을 복사한 경우: 가짜 값이 들어 있으면 복원 창
+        # AI 답변을 복사한 경우: 서버 자리표시나 이 PC의 가짜 값이 들어 있으면 복원 창
+        work = self.server_work
+        if self.server_mode() and work and work.alive() and any(tok in text for tok in work.tokens):
+            self.open_restore(text)
+            return
         if self.session.entries and restore(text, self.session.entries)[1]:
             self.open_restore(text)
             return
-        model = self.detector() if len(text) <= CLIP_MODEL_MAX_CHARS else None
+        # 창을 띄울지는 이 PC의 규칙·사전으로 정한다. 복사한 모든 글(비밀번호 등)을 서버로 보내지 않기 위해서다.
+        # 서버 처리 모드에서는 창이 열린 뒤에 서버가 전체 검사를 한다.
+        model = self.detector() if len(text) <= CLIP_MODEL_MAX_CHARS and not self.server_mode() else None
         det = detect(text, self.base, self.ignore, model=model)
         if det.blockers or any(s.confidence >= AUTO_APPLY for s in det.spans) or det.coverage == "model_failed":
             self.open_review(text, "clipboard")
@@ -214,17 +323,23 @@ class App:
         self._last_seq = self._own_seq
 
     # ================================================================== 창 열기
-    def open_review(self, text: str = "", source: str = "manual") -> None:
+    def open_review(self, text: str = "", source: str = "manual", local: bool = False) -> None:
+        """서버 처리 모드면 서버 점검 창, 아니면(또는 local=True면) 이 PC 엔진 점검 창."""
         if not text and self.reviews:  # 빈 창 요청이면 기존 창을 앞으로
             self.reviews[-1]._bring_front()
             return
-        self.reviews.append(ReviewWindow(self, text, source))
+        cls = ServerReviewWindow if self.server_mode() and not local else ReviewWindow
+        self.reviews.append(cls(self, text, source))
 
     def review_closed(self, win) -> None:
         if win in self.reviews:
             self.reviews.remove(win)
 
     def open_restore(self, text: str = "") -> None:
+        cls = ServerRestoreWindow if self.server_mode() else RestoreWindow
+        if self.restore_win and not isinstance(self.restore_win, cls):  # 처리 위치를 바꾼 뒤
+            self.restore_win.destroy()
+            self.restore_win = None
         if self.restore_win:
             if text:
                 self.restore_win.src.delete("1.0", "end")
@@ -232,10 +347,11 @@ class App:
             self.restore_win.lift()
             self.restore_win.focus_force()
             return
-        self.restore_win = RestoreWindow(self, text)
+        self.restore_win = cls(self, text)
 
-    def restore_closed(self, _win) -> None:
-        self.restore_win = None
+    def restore_closed(self, win) -> None:
+        if self.restore_win is win:
+            self.restore_win = None
 
     def open_settings(self) -> None:
         if self.settings_win:

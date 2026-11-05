@@ -485,7 +485,7 @@ class ReviewWindow(tk.Toplevel):
 class ReasonDialog(tk.Toplevel):
     """원문 전송 시 사유 선택. 사유는 큐 분류에만 쓰인다."""
 
-    def __init__(self, master, blocked: bool):
+    def __init__(self, master, blocked: bool, note: str = "원문은 기록되지 않고, 유형·건수·사유만 이 PC에 남아요."):
         super().__init__(master)
         self.result = None
         self.title("원문 그대로 사용")
@@ -495,8 +495,8 @@ class ReasonDialog(tk.Toplevel):
         msg = ("기밀로 판정된 내용이에요. 외부 AI에 보내면 보안 검토 대상으로 기록돼요."
                if blocked else "바꾸지 않은 원문을 복사합니다. 이유를 알려주세요.")
         tk.Label(self, text=msg, bg="white", font=theme.BOLD, wraplength=360, justify="left").pack(anchor="w")
-        tk.Label(self, text="원문은 기록되지 않고, 유형·건수·사유만 이 PC에 남아요.", bg="white",
-                 fg=theme.MUTED, font=theme.SMALL).pack(anchor="w", pady=(2, 10))
+        tk.Label(self, text=note, bg="white", fg=theme.MUTED, font=theme.SMALL, wraplength=360,
+                 justify="left").pack(anchor="w", pady=(2, 10))
         self.var = tk.StringVar(value="none")
         for code, label in REASONS:
             tk.Radiobutton(self, text=label, value=code, variable=self.var, bg="white",

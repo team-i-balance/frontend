@@ -18,8 +18,8 @@ class SettingsWindow(tk.Toplevel):
         super().__init__(app.root)
         self.app = app
         self.title("KP Guard — 설정·상태")
-        self.geometry("540x740")
-        self.minsize(540, 560)
+        self.geometry("560x780")
+        self.minsize(560, 600)
         self.resizable(False, True)
         self.configure(bg="white", padx=18, pady=14)
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -45,6 +45,21 @@ class SettingsWindow(tk.Toplevel):
         self.btn_pause = theme.plain_button(row, "30분 일시정지", lambda: app.post("pause"), small=True)
         self.btn_pause.pack(side="left")
 
+        pbox = ttk.LabelFrame(self, text=" 처리 위치 ", padding=8)
+        pbox.pack(fill="x", pady=4)
+        self.v_proc = tk.StringVar(value=app.settings.get("processing", "server"))
+        ttk.Radiobutton(pbox, text="서버에서 처리 (탐지·가명화·기록·답변 복원)", value="server", variable=self.v_proc,
+                        command=self._set_processing).pack(anchor="w")
+        ttk.Radiobutton(pbox, text="이 PC에서만 처리 (서버로 보내지 않음)", value="local", variable=self.v_proc,
+                        command=self._set_processing).pack(anchor="w")
+        urow = tk.Frame(pbox)
+        urow.pack(fill="x", pady=(6, 0))
+        self.v_url = tk.StringVar(value=app.settings.get("server_url", ""))
+        ttk.Entry(urow, textvariable=self.v_url).pack(side="left", fill="x", expand=True)
+        theme.plain_button(urow, "저장·연결 확인", self._save_server, small=True).pack(side="left", padx=(6, 0))
+        self.server_info = tk.Label(pbox, font=theme.SMALL, anchor="w", justify="left", wraplength=490)
+        self.server_info.pack(fill="x", pady=(4, 0))
+
         act = ttk.LabelFrame(self, text=" 열기 ", padding=8)
         act.pack(fill="x", pady=4)
         theme.plain_button(act, "프롬프트 점검 창  (Ctrl+Alt+P)", lambda: app.post("review")).pack(fill="x")
@@ -60,7 +75,7 @@ class SettingsWindow(tk.Toplevel):
         self.hotkey_info = tk.Label(act, font=theme.SMALL, fg=theme.MUTED, anchor="w", justify="left")
         self.hotkey_info.pack(fill="x", pady=(6, 0))
 
-        mbox = ttk.LabelFrame(self, text=" 소형 모델 (2단계 탐지 · 이 PC 안에서만 실행) ", padding=8)
+        mbox = ttk.LabelFrame(self, text=" 이 PC의 소형 모델 (이 PC에서 처리할 때 쓰는 2단계 탐지) ", padding=8)
         mbox.pack(fill="x", pady=4)
         self.model_info = tk.Label(mbox, font=theme.SMALL, anchor="w", justify="left", wraplength=470)
         self.model_info.pack(fill="x")
@@ -99,8 +114,25 @@ class SettingsWindow(tk.Toplevel):
         self.btn_pause.configure(text="일시정지 해제" if state == "paused" else "30분 일시정지")
         tray = "트레이 아이콘에서도 제어할 수 있어요." if self.app.tray else \
             "트레이 아이콘을 쓰려면 pip install pystray pillow 후 다시 실행하세요. 이 창을 닫아도 백그라운드에서 계속 돌아가요."
-        self.sub.configure(text="외부 네트워크 연결 없이 이 PC 안에서만 동작합니다.\n" + tray)
+        server = self.app.server
+        if self.app.server_mode():
+            where = (f"점검 창을 열면 그 글을 팀 서버({server.base_url if server else '주소 없음'})로 보내 검사해요. "
+                     "복사만 하고 창을 열지 않은 글은 보내지 않아요.")
+        else:
+            where = "외부 네트워크 연결 없이 이 PC 안에서만 동작합니다."
+        self.sub.configure(text=where + "\n" + tray)
         self.v_monitor.set(self.app.settings["monitoring"])
+        self.v_proc.set(self.app.settings.get("processing", "server"))
+        lines = [f"서버 상태: {self.app.server_status}"]
+        if os.environ.get("KPGUARD_SERVER_URL"):
+            lines.append(f"KPGUARD_SERVER_URL 환경 변수의 주소를 쓰고 있어요: {os.environ['KPGUARD_SERVER_URL']}")
+        if server is not None:
+            lines.append({None: "서버 모델: 첫 검사 때 확인해요", True: "서버 모델: 사용 중 (모델+규칙)",
+                          False: "서버 모델: 없음 → 규칙만으로 검사해요 (이름·주소 미검사)"}[server.model_available])
+            if server.insecure:
+                lines.append("암호화되지 않은 연결(HTTP)이에요. 실제 개인정보로 쓰기 전에 서버를 HTTPS로 바꿔야 해요.")
+        bad = server is None or server.insecure or self.app.server_status not in ("연결됨", "확인 전", "확인 중…")
+        self.server_info.configure(text="\n".join(lines), fg="#b91c1c" if bad else "black")
         models = self.app.models
         info = models.describe()
         if models.state == "off" and self.app.settings.get("model_enabled", True):
@@ -138,6 +170,16 @@ class SettingsWindow(tk.Toplevel):
         except OSError as exc:
             self.app.toast(f"자동 시작 설정 실패: {exc}")
         self.v_auto.set(autostart.is_enabled())
+
+    def _set_processing(self) -> None:
+        self.app.set_server(self.v_proc.get())
+        self.refresh()
+
+    def _save_server(self) -> None:
+        self.app.set_server(self.v_proc.get(), self.v_url.get())
+        if self.app.server is None:
+            self.app.toast("서버 주소는 https://주소[:포트] 형식으로 적어 주세요.")
+        self.refresh()
 
     def _pick_model(self) -> None:
         folder = filedialog.askdirectory(parent=self, title="AEGIS 모델 폴더 (model.onnx · tokenizer.json · config.json)")

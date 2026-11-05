@@ -48,17 +48,29 @@
 - UI는 이후 교체 예정. 지금은 **일반 사용자용 흐름 확인**이 목적 (tkinter, 외부 의존성 없음).
 
 ## 결정 메모 (2026-11-05) — 팀 레포(backend, slm) 연동
-- **탐지는 전부 PC 안에서 한다.** 규칙 → 사전·베이스 → backend `local_ai`(AEGIS ONNX) → slm(GLiNER) 순서. 모두 onnxruntime으로 오프라인 실행, NPU는 나중에.
-  backend의 `/process`·`/decide`(sum 브랜치, 원문을 서버에서 탐지)는 쓰지 않는다. R4("PC 안에서만")와 발표 메시지에 어긋남
-- **서버는 조직 모드에서만**: SLM 정책 규칙 받기, 원문 없는 이벤트 올리기. HTTPS + 토큰 인증, 사용자가 켰을 때만 통신 (Phase 5에서)
-- 지금 반영: AEGIS 2단계(모델 폴더를 지정하면 켜짐), xlsx 보호본(backend `file_sanitizer`)을 파일 검사 창에 연결
+- **탐지도 서버에서 한다 (같은 날 결정 변경).** 처음에는 "탐지는 PC 안에서만"으로 정했다가, 무거운 작업은 서버에서 돌리기로 바꿨다.
+  - 서버(backend main): `/process` 탐지·가명화 → `/process/decide` 사용자 선택 기록 → `/process/restore` 답변 복원
+  - 이 PC: 감시·단축키·트레이·화면, 복사한 글을 창에 띄울지 판단(규칙·사전, 복사한 모든 글을 서버로 보내지 않기 위해),
+    조직 베이스(코드네임·고객사·사내 도메인)는 서버로 보내기 전에 태그로 바꿈, 기밀 표기·사내 소스코드 차단, 파일 검사
+  - "이 PC에서만 처리" 모드와 서버에 닿지 않을 때의 "이 PC에서 검사"는 남겨 둔다 (AEGIS 2단계·xlsx 보호본 포함)
+- 반영: `agent/server/`(API 클라이언트, 서버 결과 ↔ 원문 위치 맞추기), `gui/server_review.py`(서버 점검·복원 창), 설정 창 "처리 위치"
+- 검증: 같은 backend 코드(main `2042ae3`)를 로컬에서 띄워 검사·기록·복원·규칙만 모드·GUI 흐름 확인.
+  실제 팀 서버(`13.193.207.69:8501`, 평문 HTTP)는 개발 환경에서 닿지 않아 확인하지 못함
+- **backend에 필요한 일** (테스트하면서 확인)
+  - HTTPS + 토큰 인증: 지금은 원문 프롬프트가 HTTP 평문으로 가고 인증이 없다. `/logs/events` GET으로 전체 로그도 보인다
+  - 큐 분류 규칙 3(`cancel` + high → `real_violation`)이 흐름도와 다르다. 점검 창을 닫기만 해도 실제 위반으로 쌓인다.
+    흐름도: 취소 → 사전 경고, "무시(사유 없이 원문 전송) + 확실한 탐지" → 실제 위반
+  - `revert_original`은 매핑을 바로 지워서 일부만 되돌린 뒤 답변 복원이 안 된다 → 앱은 `send_transformed` + 사유로 기록 중
+  - 이름에 붙은 조사를 떼지 않는다: "김민수의" → `[이름_1]`, 복원하면 "김민수의님께". 앱의 `detect/model.py` `trim_josa` 참고
+  - onnxruntime이 `mobile.events.data.microsoft.com`으로 원격 수집 연결을 시도한다 (`disable_telemetry_events()`로는 안 꺼짐).
+    서비스 환경에 `ORT_DISABLE_TELEMETRY=1` 필요
+  - `LOCAL_PII_MODEL_DIR`이 없으면 전화·이메일 규칙만 돈다(이름·주소 미검사). 배포 서버에 모델 경로를 설정해야 한다
+  - 조직 베이스·기밀(C) 판정, 파일 검사 API, `/process` 응답의 탐지 위치(span)가 없다 → 지금은 앱이 PC에서 메운다
+  - 작업은 `/process` 시점부터 10분, 복원은 한 번만 된다 (긴 대화의 여러 답변을 복원하려면 연장·여러 번 복원이 필요)
 - 남은 일
-  - 모델 파일 두 개(AEGIS `model.onnx`·`tokenizer.json`·`config.json`, SLM `models/v1/final`)를 받을 곳 정하기 → 받으면 실제 모델로 정확도·속도 측정
-  - SLM: PyTorch·gliner를 앱에 넣지 않고 ONNX(INT8)로 내보내 연결. 학습 때 쓴 분리기(python-mecab-ko)가 Windows에서 도는지 확인
+  - 모델 파일(AEGIS `model.onnx`·`tokenizer.json`·`config.json`, SLM `models/v1/final`)을 서버에 올리기 → 실제 모델로 정확도·속도 측정
+  - SLM: 서버에서 실행 (README 목표도 "사내 서버"). 정책 규칙은 서버가 관리
   - slm 레포는 Windows에서 클론이 안 된다: `data/train_raw/con.*` 파일명의 `CON`이 Windows 예약 이름 → 이름 변경 필요 (slm 레포 담당)
-  - backend `/logs`(main): 인증 없음(GET으로 전체 로그 조회 가능), HTTP 평문 → 조직 모드 전에 토큰·HTTPS 필요.
-    큐 분류도 스펙과 다름(서버: "취소 + 확실한 탐지 → 실제 위반", 스펙: "원문 전송 + 사유 없음 + 확실한 탐지 → 실제 위반, 취소는 사전 경고"),
-    액션·사유·큐 이름도 다름(예: 서버에 `approved` 사유 없음) → 이 앱의 `events/log.py`를 기준으로 맞춘다
 
 ---
 

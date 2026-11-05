@@ -1,7 +1,8 @@
 # KP Guard (프로토타입)
 
 생성형 AI(Claude Code, Codex CLI, IDE 터미널, 명령 프롬프트, 웹 채팅)에 프롬프트를 보내기 전에
-개인정보·기밀정보를 PC 안에서만 찾아 자연스러운 평문으로 바꿔 주는 도구. 외부 네트워크 연결 없음.
+개인정보·기밀정보를 찾아 가려 주는 도구. 탐지·가명화·기록·답변 복원은 **팀 서버(backend)**가 하고,
+이 PC의 앱은 감시·화면·조직 베이스 확인을 맡는다. 서버로 보내지 않는 "이 PC에서만 처리" 모드도 있다.
 
 > 지금은 **일반 사용자용 GUI 흐름 확인용**이다. UI는 이후 교체한다. 작업 목록: `.kiro/specs/kp-guard/tasks.md`
 
@@ -16,9 +17,30 @@ pythonw kp_guard.pyw --background    # 창 없이 트레이에 상주 (자동 �
 첫 실행 때 "Windows 로그인 시 자동 실행" 여부를 묻는다. 설정 창에서 언제든 켜고 끌 수 있다
 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\KPGuard`, 관리자 권한 불필요).
 
-## 탐지 단계
+## 처리 위치: 서버 (기본) / 이 PC
 
-탐지는 모두 이 PC 안에서 한다. 원문을 서버로 보내지 않는다.
+설정 창의 "처리 위치"에서 고른다. 기본은 서버이고 주소는 `http://13.193.207.69:8501`(팀 backend)이다.
+주소는 설정 창이나 `KPGUARD_SERVER_URL` 환경 변수로 바꾼다.
+
+| 하는 일 | 서버 처리 | 이 PC에서만 처리 |
+|---|---|---|
+| 개인정보 탐지·가명화 (`[이름_1]` 같은 자리표시) | 서버 `POST /process` | 이 PC 엔진 (가짜 값으로 바꿈) |
+| 사용자 선택 기록 (변환문 전송·원문 전송·취소, 사유) | 서버 `POST /process/decide` | 이 PC 로그만 |
+| AI 답변 복원 | 서버 `POST /process/restore` | 이 PC 매핑 |
+| 조직 베이스(코드네임·고객사·사내 도메인) | **서버로 보내기 전에 이 PC에서 태그로 바꿈** | 이 PC |
+| 기밀 표기·사내 소스코드 차단 | 이 PC (서버에 아직 없음) | 이 PC |
+| 복사한 글을 창에 띄울지 판단 | 이 PC 규칙·사전 (복사한 모든 글을 서버로 보내지 않기 위해) | 이 PC |
+| 파일 검사 (엑셀 보호본) | 이 PC (서버에 파일 API가 없음) | 이 PC |
+
+서버 처리 점검 창은 서버 결과를 원문과 맞춰 하이라이트하고, 항목별 되돌리기·놓친 정보 신고를 보낼 글에 반영한다.
+서버가 위치를 돌려주지 않으므로 원문 위치는 앱이 맞춰 찾는다. 위치가 하나로 정해지지 않는 항목은 되돌리기를 막는다.
+
+- **서버 작업은 `/process` 시점부터 10분 동안만 남고, 답변 복원은 한 번만 된다** (backend `app/sessions.py`)
+- 서버에 탐지 모델(`LOCAL_PII_MODEL_DIR`)이 없으면 규칙만 모드로 다시 요청하고 "이름·주소 미검사"라고 표시한다
+- 서버에 닿지 않으면 점검 창에서 "이 PC에서 검사"로 같은 글을 이 PC 엔진으로 검사할 수 있다
+- **지금 서버는 HTTP(암호화 없음)이고 인증이 없다.** 앱은 점검 창과 설정 창에 경고를 띄운다. 실제 개인정보로 쓰기 전에 HTTPS와 토큰 인증이 필요하다
+
+## 탐지 단계 (이 PC에서 처리할 때)
 
 | 단계 | 내용 | 켜지는 조건 |
 |---|---|---|
@@ -39,7 +61,9 @@ config.json   (id2label)
 - 모델은 백그라운드에서 불러오고, 준비되기 전에는 규칙·사전만으로 검사한다. 점검 창 오른쪽 위에 검사 범위가 나온다.
 - 모델 추론이 실패하면 그 글은 "규칙·사전만"으로 표시하고 경고한다. 파일 검사는 보호본을 만들지 않는다.
 - 확률이 0.6 미만인 모델 결과는 바로 바꾸지 않고 밑줄(확인 필요)로 보여 준다.
-- onnxruntime은 CPU로 실행하고 텔레메트리를 끈다. 실행 중에 모델을 내려받지 않는다.
+- onnxruntime은 CPU로 실행하고 실행 중에 모델을 내려받지 않는다. onnxruntime(1.31.1에서 확인)은
+  `disable_telemetry_events()`를 불러도 추론 중 `mobile.events.data.microsoft.com`으로 연결을 시도해서,
+  앱은 onnxruntime을 불러오기 전에 `ORT_DISABLE_TELEMETRY=1`을 넣는다 (넣은 뒤로는 시도가 없었다).
 
 ## 파일 검사 (엑셀 보호본)
 
@@ -69,9 +93,12 @@ exe에는 onnxruntime 등 실행 모듈만 들어가고 모델 파일은 들어�
 
 ```powershell
 pip install -r requirements-dev.txt
-python -m unittest discover -s tests -t . -v   # 탐지·모델 연동·파일 검사 (모델은 tests/toy_model.py의 가짜 모델)
-python tools/smoke_gui.py                      # GUI 흐름 자동 점검
+python -m unittest discover -s tests -t . -v   # 탐지·모델·파일 검사·서버 API (가짜 모델 tests/toy_model.py, 가짜 서버 tests/fake_backend.py)
+python tools/smoke_gui.py                      # GUI 흐름 자동 점검 (서버 처리는 가짜 서버로)
 ```
+
+실제 backend로 서버 흐름을 점검하려면 backend를 로컬에서 띄우고 `KPGUARD_SMOKE_SERVER=http://127.0.0.1:8000`을 주고
+`tools/smoke_gui.py`를 실행한다 (합성 데이터만 보낸다).
 
 ## 흐름
 
@@ -103,11 +130,13 @@ agent/
 ├─ detect/                 rules(0단계) · lexicon(1단계 경량) · model(2단계 AEGIS ONNX) · scoring(등급·조합 위험) · pipeline
 ├─ sanitize/               engine(전략·치환·문장 정리) · fakes · josa(조사 보정) · restore(답변 복원)
 ├─ files/                  processor(엔진 연결·보호본 재검사) · xlsx/(backend file_sanitizer 사본)
+├─ server/                 client(backend API) · align(서버 결과 ↔ 원문 위치, 보낼 글 조립, 미리 가리기)
 ├─ events/log.py           SQLite 로그, classify() 큐 분류, JSONL 내보내기
 ├─ system/                 win32(클립보드·단축키·뮤텍스) · autostart(레지스트리 Run)
-├─ gui/                    app(상주·감시) · review(점검 창) · file_window(파일 검사) · restore_window · settings_window · tray
+├─ gui/                    app(상주·감시) · review(점검 창) · server_review(서버 처리 점검·복원 창) · file_window(파일 검사)
+│                          · restore_window · settings_window · tray
 └─ assets/demo_base.json   시연용 가상 조직 베이스 (코드네임·고객사·내부 도메인)
-tests/                     unittest (toy_model.py: 테스트용 가짜 AEGIS 모델)
+tests/                     unittest (toy_model.py: 가짜 AEGIS 모델, fake_backend.py: 가짜 팀 서버)
 tools/smoke_gui.py         GUI 흐름 자동 점검 (임시 폴더 사용)
 build.ps1 · KPGuard.spec   데스크톱 앱(exe) 빌드
 ```
@@ -118,6 +147,9 @@ build.ps1 · KPGuard.spec   데스크톱 앱(exe) 빌드
   (CPU 실행만, INT8 변환·NPU는 Phase 4). SLM(기밀 구간)은 모델 파일을 받은 뒤 연결한다
 - 파일 검사는 값만 있는 `.xlsx`만 지원한다. docx·pptx·hwp·pdf는 Phase 2 남은 작업
 - CLI 입력을 직접 가로채지 않고 클립보드로 연결한다. Claude Code 훅·CLI 래퍼는 P0.11
-- 매핑은 앱 메모리에만 있어 앱을 끄면 이전 답변은 복원할 수 없다 (의도된 동작)
+- 이 PC 처리의 매핑은 앱 메모리에만 있어 앱을 끄면 이전 답변은 복원할 수 없다 (의도된 동작).
+  서버 처리의 매핑은 서버에 10분, 한 번 복원할 때까지만 있다
+- 서버 처리는 실제 팀 서버(`13.193.207.69:8501`)로는 검증하지 못했다 (개발 환경에서 평문 HTTP 서버에 닿지 않음).
+  같은 backend 코드(main `2042ae3`)를 로컬에서 띄워 검사·기록·복원·규칙만 모드를 확인했다
 - 모든 예시 값은 합성 데이터
 - exe는 코드 서명이 없어 SmartScreen·백신 경고가 뜰 수 있고, 설치 프로그램은 아직 없다 (태스크 27)

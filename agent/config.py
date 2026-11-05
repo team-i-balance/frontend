@@ -16,6 +16,10 @@ DEFAULTS = {
     "model_dir": "",           # 2단계 소형 모델(AEGIS) 폴더. 비우면 기본 폴더에 모델이 있을 때만 켠다
     "model_enabled": True,     # 모델을 끄고 규칙·사전만 쓰려면 False
     "model_threads": 2,
+    # 처리 위치 (2026-11-05 결정): server = 탐지·가명화·기록·복원을 팀 서버에서, local = 이 PC 엔진만
+    "processing": "server",
+    "server_url": "http://13.193.207.69:8501",  # 팀 backend (README의 배포 주소). KPGUARD_SERVER_URL로 덮어쓸 수 있다
+    "server_timeout": 20,
 }
 
 
@@ -24,6 +28,10 @@ def data_dir() -> Path:
     path = Path(base) / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def server_url(settings: dict) -> str:
+    return os.environ.get("KPGUARD_SERVER_URL") or settings.get("server_url", "")
 
 
 def default_model_dir() -> Path:

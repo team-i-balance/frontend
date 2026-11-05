@@ -67,6 +67,10 @@ class DecodeTests(unittest.TestCase):
 
 
 class LoadingTests(unittest.TestCase):
+    def test_onnxruntime_telemetry_is_disabled_before_import(self):
+        import os
+        self.assertEqual(os.environ.get("ORT_DISABLE_TELEMETRY"), "1")
+
     def test_missing_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ModelUnavailable):
