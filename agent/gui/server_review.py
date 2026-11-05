@@ -584,7 +584,7 @@ class ServerReviewWindow(tk.Toplevel):
         self.app.server_decide(self.result, action, self._reason(), retry_text=self.result_sent,
                                tokens=self._sent_tokens())
         self._log_local("sent_sanitized")
-        self.app.toast("변환문을 복사했어요. Claude Code·Codex·채팅창에 붙여넣으세요 (Ctrl+V)." if g != "O"
+        self.app.toast("변환문을 복사했어요. Claude 입력창에 붙여넣으세요 (Ctrl+V)." if g != "O"
                        else "복사했어요. 붙여넣어 사용하세요.")
         self._close()
 

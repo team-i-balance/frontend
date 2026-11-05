@@ -1,4 +1,10 @@
-"""Verify the built EXE using a real console window containing only synthetic CLI rows."""
+"""Verify the built EXE in a real Chrome window showing a claude.ai composer (no extension).
+
+Scope (2026-11-05): Claude in the browser only. The page and the team server are local fixtures:
+the page is served by Playwright for https://claude.ai/ and never reaches Claude.
+
+python tools/smoke_windows_package.py dist/KPGuard/KPGuard.exe   (interactive Windows desktop)
+"""
 
 import ctypes
 import json
@@ -9,21 +15,18 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import urlsplit
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-TITLE = "KP Guard fixture - Codex"
+TOOLS = Path(__file__).resolve().parent
+sys.path.insert(0, str(TOOLS.parent))
+sys.path.insert(0, str(TOOLS))
 DRAFT = "sample 010-2345-6789"
-
-
-def console_fixture():
-    # Explicit console output also works when the runner redirects stdio.
-    ctypes.windll.kernel32.SetConsoleTitleW(TITLE)
-    with open("CONOUT$", "w", encoding="utf-8") as output:
-        print("OpenAI Codex (fixture)\nprior reply containing HISTORY_ONLY\n", file=output, flush=True)
-        text = sys.stdin.readline().strip()
-        print(f"› {text}\n\n  ? for shortcuts\n", file=output, flush=True)
-        sys.stdin.readline()
+PAGE = (
+    "<title>KP Native Fixture</title><body><button>outside</button>"
+    "<style>[contenteditable]{display:block;margin:50px;width:480px;min-height:75px;font:20px sans-serif}</style>"
+    '<div role="textbox" aria-multiline="true" aria-label="Reply to Claude" contenteditable="true"'
+    ' class="tiptap ProseMirror"></div>'
+)
 
 
 def wait_for(predicate, message, timeout=20):
@@ -43,8 +46,15 @@ def terminate(process):
 
 def check(path):
     from ctypes import wintypes as W
+
+    from playwright.sync_api import sync_playwright
     from smoke_browser import FixtureBackend
+    from smoke_native import activate_fixture, type_direct
+
+    from agent.main import _dpi_aware
     from agent.overlay import windows as win
+
+    _dpi_aware()  # 화면 좌표(마우스·표시 창)를 실제 픽셀로 맞춘다
 
     class Backend(FixtureBackend):
         def handle(self, route, body):
@@ -77,58 +87,56 @@ def check(path):
         wait_for(
             lambda: "/health" in backend.requests, "packaged GUI failed to reach the fixture backend", 45
         )
-        console = subprocess.Popen(
-            [sys.executable, __file__, "--fixture"],
-            stdin=subprocess.PIPE,
-            text=True,
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-        exits.callback(terminate, console)
-        window = win.u.WindowControl(searchDepth=1, RegexName=r".*KP Guard fixture - Codex.*")
-        wait_for(lambda: window.Exists(0.3, 0.05), "console window missing")
-        window.SetActive(waitTime=0)
-        console.stdin.write(DRAFT + "\n")
-        console.stdin.flush()
-        wait_for(lambda: DRAFT in previews, "packaged GUI did not scan the visible CLI composer")
-        assert all("HISTORY_ONLY" not in text for text in previews), "terminal history reached the server"
+
+        play = exits.enter_context(sync_playwright())
+        browser = play.chromium.launch(channel="chrome", headless=False)
+        exits.callback(browser.close)
+        ctx = browser.new_context(no_viewport=True)
+
+        def fixture(route):
+            if urlsplit(route.request.url).hostname == "claude.ai" and route.request.resource_type == "document":
+                route.fulfill(content_type="text/html", body=PAGE)
+            else:
+                route.abort()
+
+        ctx.route("**/*", fixture)
+        page = ctx.new_page()
+        page.goto("https://claude.ai/new")
+        page.bring_to_front()
+        field = page.locator("[contenteditable]")
+        field.click()
+        hwnd = activate_fixture(page, field)
+        type_direct(page, hwnd, DRAFT)
+        wait_for(lambda: DRAFT in previews, "packaged GUI did not scan the claude.ai composer")
+
         find = win.api(win.user, "FindWindowExW", W.HWND, W.HWND, W.HWND, W.LPCWSTR, W.LPCWSTR)
         visible = win.api(win.user, "IsWindowVisible", W.BOOL, W.HWND)
 
         def painted():
-            hwnd = find(None, None, "KPGuardTextMark", None)
-            while hwnd:
+            mark = find(None, None, "KPGuardTextMark", None)
+            while mark:
                 pid = W.DWORD()
-                win.pid_for(hwnd, ctypes.byref(pid))
-                if win.executable(pid.value) == path.name.lower() and visible(hwnd):
+                win.pid_for(mark, ctypes.byref(pid))
+                if win.executable(pid.value) == path.name.lower() and visible(mark):
                     return True
-                hwnd = find(None, hwnd, "KPGuardTextMark", None)
+                mark = find(None, mark, "KPGuardTextMark", None)
             return False
 
         # A first-run tray notification may have appeared while the executable loaded.
-        window.SetActive(waitTime=0)
+        win.u.WindowControl(searchDepth=1, RegexName=".*KP Native Fixture.*").SetActive(waitTime=0)
         try:
             wait_for(painted, "no visible native word mark from packaged executable")
         except AssertionError:
             active, pid = win.foreground(), W.DWORD()
             win.pid_for(active, ctypes.byref(pid))
             print(
-                f"active={win.executable(pid.value)}, fixture={active == window.NativeWindowHandle}, received={len(previews)}",
+                f"active={win.executable(pid.value)}, fixture={active == hwnd}, received={len(previews)}",
                 flush=True,
             )
-            with win.Reader() as reader:
-                source = reader.sample()
-                if isinstance(source, win.Snapshot) and source.draft.text == DRAFT:
-                    a = DRAFT.index("010")
-                    print(f"source bounds={list(source.rectangles(a, len(DRAFT)))}", flush=True)
             raise
         assert app.poll() is None
-        print(
-            "Packaged executable: Windows console composer -> fixture server -> native visible mark passed."
-        )
+        print("Packaged executable: Chrome claude.ai composer -> fixture server -> native visible mark passed.")
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "--fixture":
-        console_fixture()
-    else:
-        check(Path(sys.argv[1]))
+    check(Path(sys.argv[1]))

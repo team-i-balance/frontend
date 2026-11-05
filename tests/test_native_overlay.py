@@ -10,42 +10,26 @@ from unittest.mock import Mock
 from agent.browser.actions import BrowserActions
 from agent.overlay.controller import Frame, NativeOverlay, make_frame
 from agent.overlay.live import LiveRanges
-from agent.overlay.source import Draft, Snapshot, clip, composer, site, terminal_draft
+from agent.overlay.source import Draft, Snapshot, clip, composer, site
 
 
 class DraftTests(unittest.TestCase):
     def test_trusted_editors(self):
-        self.assertEqual(site("https://chatgpt.com/c/123"), "chatgpt.com")
+        # Claude in the browser only (claude.ai, including Claude Code on the web).
         self.assertEqual(site("https://claude.ai/new"), "claude.ai")
+        self.assertEqual(site("https://claude.ai/code"), "claude.ai")
         for url in (
-            "https://chatgpt.com.evil.test",
+            "https://chatgpt.com/c/123",
+            "https://claude.ai.evil.test",
             "https://claude.ai@evil.test",
-            "http://chatgpt.com",
-            "https://chatgpt.com:7777/x",
-            "file:///chatgpt.com",
+            "http://claude.ai",
+            "https://claude.ai:7777/x",
+            "file:///claude.ai",
         ):
             self.assertFalse(site(url))
-        self.assertTrue(composer("prompt-textarea", "", "", False))
         self.assertTrue(composer("", "tiptap ProseMirror", "", True))
+        self.assertTrue(composer("", "", "Reply to Claude", False))
         self.assertFalse(composer("search", "", "Search chats", True))
-
-    def test_claude_only_draft_never_scrollback(self):
-        raw = "previous reply: PRIVATE\r\n─────────────────\r\n❯ 한글 🧪 010\r\n  다음 줄\r\n─────────────────\r\n  ? for shortcuts\r\n"
-        draft = terminal_draft(raw)
-        self.assertEqual(draft.text, "한글 🧪 010\n다음 줄")
-        for token in ("한글", "🧪", "010", "다음 줄"):
-            offset = draft.text.index(token)
-            self.assertEqual("".join(raw[a:b] for a, b in draft.parts(offset, offset + len(token))), token)
-        self.assertEqual([raw[a:b] for a, b in draft.parts(5, len(draft.text))], ["010", "다음 줄"])
-        self.assertIsNone(terminal_draft(raw + "$ ", "Claude Code"))
-
-    def test_codex_active_prompt_after_previous_turn(self):
-        raw = "OpenAI Codex (v1)\n› old private turn\n• response\n› current draft\n\n  ? for shortcuts\n"
-        self.assertEqual(terminal_draft(raw).text, "current draft")
-        self.assertEqual(terminal_draft(raw.replace("current draft", "")).text, "")
-        self.assertIsNone(terminal_draft("› ordinary shell\n  ? for shortcuts"))
-        self.assertIsNone(terminal_draft("❯ sudo example\n", "Claude Code"))
-        self.assertIsNone(terminal_draft("OpenAI Codex\n› old\n  ? for shortcuts\n$ echo new"))
 
     def test_frame_geometry_does_not_use_the_caret_or_selection(self):
         draft = Draft.plain("010 010")
@@ -112,12 +96,13 @@ class LiveTests(unittest.TestCase):
         app = SimpleNamespace(monitoring_active=lambda: True, server_mode=lambda: True)
         actions = BrowserActions(app)
         actions.preview = Mock(return_value={"spans": []})
-        actions.handle({"action": "preview", "text": "abc", "site": "chatgpt.com", "channel": "tab1"})
-        self.assertTrue(actions.extension_covers("chatgpt.com", "abc"))
-        self.assertFalse(actions.extension_covers("chatgpt.com", "other"))
-        self.assertFalse(actions.extension_covers("cli", "abc"))
+        actions.handle({"action": "preview", "text": "abc", "site": "claude.ai", "channel": "tab1"})
+        self.assertTrue(actions.extension_covers("claude.ai", "abc"))
+        self.assertFalse(actions.extension_covers("claude.ai", "other"))
+        actions.handle({"action": "preview", "text": "xyz", "site": "chatgpt.com", "channel": "tab2"})
+        self.assertFalse(actions.extension_covers("chatgpt.com", "xyz"))  # 지원하지 않는 사이트
         actions.clear()
-        self.assertFalse(actions.extension_covers("chatgpt.com", "abc"))
+        self.assertFalse(actions.extension_covers("claude.ai", "abc"))
 
     def test_mark_click_and_outside_preserve_the_same_frame(self):
         overlay = NativeOverlay.__new__(NativeOverlay)
@@ -125,7 +110,7 @@ class LiveTests(unittest.TestCase):
         overlay._open = Mock()
         bounds = (20, 20, 60, 40)
         frame = make_frame(
-            Snapshot((7, "cli"), Draft.plain("abc"), lambda a, b: [bounds]),
+            Snapshot((7, "claude.ai"), Draft.plain("abc"), lambda a, b: [bounds]),
             [{"start": 0, "end": 3, "label": "이름"}],
         )
         overlay._mouse(frame, 25, 25, True)

@@ -1,7 +1,7 @@
 """Type into a real browser window, wait for native marks, and click through them.
 
-The two AI origins and the detector are local fixtures. No extension or browser pairing.
-Run on an interactive Windows desktop, or on macOS with Accessibility granted to Python.
+Scope (2026-11-05): Claude in the browser only. The claude.ai origin, an unrelated origin and the detector
+are local fixtures. No extension or browser pairing. Run on an interactive Windows desktop.
 """
 
 import sys
@@ -123,7 +123,6 @@ def main():
             )
             ctx = browser.new_context(no_viewport=True)
             documents = {
-                "chatgpt.com": '<textarea id="prompt-textarea" aria-label="Message ChatGPT"></textarea>',
                 "claude.ai": '<div role="textbox" aria-multiline="true" aria-label="Reply to Claude" contenteditable="true" class="tiptap ProseMirror"></div>',
                 "example.org": '<textarea id="prompt-textarea"></textarea>',
             }

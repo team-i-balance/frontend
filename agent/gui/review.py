@@ -282,7 +282,7 @@ class ReviewWindow(tk.Toplevel):
             if reverted:
                 lines.append(f"• 되돌린 항목 {reverted}건은 원문 그대로 나가요.")
             lines += [f"• {n}" for n in self.notes]
-            lines.append("변환문을 복사해 Claude Code·Codex·채팅창에 붙여넣으세요. AI 답변은 '답변 복원'으로 원래 값으로 바꿀 수 있어요.")
+            lines.append("변환문을 복사해 Claude 입력창에 붙여넣으세요. AI 답변은 '답변 복원'으로 원래 값으로 바꿀 수 있어요.")
             self.btn_send.configure(text="변환문 복사", state="normal")
         else:
             title = "공개 · 민감정보가 보이지 않아요"
@@ -429,7 +429,7 @@ class ReviewWindow(tk.Toplevel):
             return
         self.app.copy_to_clipboard(self.result.text)
         self._log("sent_sanitized")
-        msg = ("변환문을 복사했어요. Claude Code·Codex·채팅창에 붙여넣으세요 (Ctrl+V)"
+        msg = ("변환문을 복사했어요. Claude 입력창에 붙여넣으세요 (Ctrl+V)"
                if self.grade == "S" else "복사했어요. 붙여넣어 사용하세요")
         self.app.toast(msg)
         self._close()

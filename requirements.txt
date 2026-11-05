@@ -22,6 +22,3 @@ uiautomation==2.0.29; sys_platform == "win32"
 pyobjc-framework-ApplicationServices>=10,<13; sys_platform == "darwin"
 pyobjc-framework-Cocoa>=10,<13; sys_platform == "darwin"
 pyobjc-framework-Quartz>=10,<13; sys_platform == "darwin"
-
-# Claude Code / Codex CLI 실시간 입력창
-prompt-toolkit>=3.0.43,<4

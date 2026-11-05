@@ -171,7 +171,7 @@ class App:
         if self.browser:
             self.browser.stop()
             self.browser = None
-        self.toast("브라우저·CLI 연결을 해제했습니다.")
+        self.toast("브라우저 연결을 해제했습니다.")
 
     def detector(self):
         """지금 쓸 수 있는 2단계 모델 (없으면 None → 규칙·사전만)."""
@@ -561,7 +561,7 @@ class App:
             if self.settings_win:
                 self.settings_win.v_auto.set(autostart.is_enabled())
         if background and self.tray:
-            self.tray.notify("ChatGPT·Claude 입력창에서 감지된 단어를 클릭해 점검할 수 있습니다.")
+            self.tray.notify("브라우저의 Claude 입력창에서 감지된 단어를 클릭해 점검할 수 있습니다.")
 
     def quit(self) -> None:
         self.overlay.close()

@@ -15,7 +15,7 @@ const actions = new Set([
   'detail',
   'desktop_restore',
 ]);
-const trusted = new Set(['https://chatgpt.com', 'https://claude.ai']);
+const trusted = new Set(['https://claude.ai']);
 const hex = (bytes) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, '0')).join('');
 if (api.storage.local.setAccessLevel) api.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 

@@ -87,7 +87,7 @@ class SettingsWindow(tk.Toplevel):
         self.btn_pause.pack(anchor="w")
         connection = tk.Frame(box.body, bg=theme.BG_SURFACE)
         connection.pack(anchor="w", pady=(px(8), 0))
-        theme.Button(connection, "브라우저·CLI 연결 코드 복사", app.pair_browser, size="sm").pack(side="left")
+        theme.Button(connection, "브라우저 연결 코드 복사", app.pair_browser, size="sm").pack(side="left")
         theme.Button(connection, "연결 해제", app.disconnect_browser, kind="ghost", size="sm").pack(side="left")
 
         # ---------------------------------------------------------------- 처리 위치

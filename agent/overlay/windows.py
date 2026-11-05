@@ -7,11 +7,10 @@ from collections import deque
 from ctypes import wintypes as W
 
 import uiautomation as u
-from comtypes import COMError
 from comtypes.client import CreateObject, GetModule
 
 from ..server.client import MAX_TEXT
-from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site, terminal_draft
+from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site
 
 user = C.WinDLL("user32", use_last_error=True)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -41,7 +40,6 @@ BROWSERS = {
     "opera.exe",
     "arc.exe",
 }
-TERMINALS = {"windowsterminal.exe", "openconsole.exe", "conhost.exe"}
 
 
 def executable(pid):
@@ -130,7 +128,7 @@ def editor_range(field, doc):
     return None
 
 
-def boxes(text_range, raw, a, b, console=False):
+def boxes(text_range, raw, a, b):
     """UIA text units need not match Python code points (emoji, CRLF). Verify the exact occurrence."""
     rest = text_range.Clone()
     needle = raw[a:b]
@@ -150,52 +148,12 @@ def boxes(text_range, raw, a, b, console=False):
             if raw.count(needle) > 1:
                 prefix = text_range.Clone()
                 prefix.MoveEndpointByRange(1, match, 0, 0)
-                actual, wanted = prefix.GetText(-1), raw[:a]
-                # Console providers trim padding at the end of a clipped range.
-                if console:
-                    actual, wanted = actual.rstrip(), wanted.rstrip()
-                if actual != wanted:
+                if prefix.GetText(-1) != raw[:a]:
                     return []
             return [rect(r) for r in match.GetBoundingRectangles()]
         cursor = expected + len(needle)
         rest.MoveEndpointByRange(0, match, 1, 0)
     return []
-
-
-def console_line_boxes(view, raw, a, b):
-    # Some console providers only implement character bounds within individual visual line ranges.
-    # Move by native lines first: UIA character units count padded cells differently from GetText.
-    rows = raw.splitlines(keepends=True)
-    offset = 0
-    for number, row in enumerate(rows):
-        if offset <= a < offset + len(row):
-            break
-        offset += len(row)
-    else:
-        return []
-    line = view.Clone()
-    line.MoveEndpointByRange(1, line, 0, 0)
-    if number and line.MoveEndpointByUnit(1, u.TextUnit.Line, number, 0) != number:
-        return []
-    line.MoveEndpointByRange(0, line, 1, 0)
-    line.ExpandToEnclosingUnit(u.TextUnit.Line, 0)
-    text = line.GetText(-1)
-    if text.rstrip() != row.rstrip():
-        return []
-    start, end = a - offset, b - offset
-    if end > len(text):
-        return []
-    try:
-        result = boxes(line, text, start, end, console=True)
-    except (OSError, COMError):
-        result = []
-    if result:
-        return result
-    line.MoveEndpointByRange(1, line, 0, 0)
-    line.MoveEndpointByUnit(1, u.TextUnit.Character, start, 0)
-    line.MoveEndpointByRange(0, line, 1, 0)
-    line.MoveEndpointByUnit(1, u.TextUnit.Character, end - start, 0)
-    return [rect(r) for r in line.GetBoundingRectangles()] if line.GetText(-1) == raw[a:b] else []
 
 
 class Reader:
@@ -275,35 +233,11 @@ class Reader:
         if pid.value == os.getpid():
             return OWN_WINDOW
         exe = executable(pid.value)
-        if exe not in BROWSERS | TERMINALS:
+        if exe not in BROWSERS:
             return None
         focused = u.GetFocusedControl()
         top = focused.GetTopLevelControl() if focused else None
         lineage = list(ancestry(focused)) if top and top.NativeWindowHandle == hwnd else []
-        if exe in TERMINALS:
-            self.reset()
-            for field in lineage:
-                if field.ControlTypeName not in (
-                    "TextControl",
-                    "DocumentControl",
-                    "EditControl",
-                    "PaneControl",
-                ):
-                    continue
-                pattern = field.GetPattern(u.PatternId.TextPattern)
-                if pattern:
-                    visible = pattern.GetVisibleRanges()
-                    if not visible:
-                        continue
-                    # Console providers may expose the viewport as one range per visible row.
-                    view = visible[0].Clone()
-                    view.MoveEndpointByRange(1, visible[-1], 1, 0)
-                    raw = view.GetText(100001)
-                    draft = terminal_draft(raw, u.GetWindowText(hwnd))
-                    if draft is not None:
-                        return self.snapshot(hwnd, "cli", field, view, raw, draft)
-            return None
-
         docs = [n for n in lineage if n.ControlTypeName == "DocumentControl"]
         # After clicking page chrome the focused UIA element often belongs to the address bar.
         # Resolve the page under the foreground window and keep scanning its original composer.
@@ -346,22 +280,10 @@ class Reader:
     @staticmethod
     def snapshot(hwnd, kind, field, view, raw, draft, url=""):
         viewport = rect(field.BoundingRectangle)
-        if kind == "cli" and (viewport[2] <= viewport[0] or viewport[3] <= viewport[1]):
-            area = W.RECT()
-            api(user, "GetWindowRect", W.BOOL, W.HWND, C.POINTER(W.RECT))(hwnd, C.byref(area))
-            viewport = rect(area)
 
         def ranges(a, b):
             for start, end in draft.parts(a, b):
-                try:
-                    regions = boxes(view, raw, start, end, console=kind == "cli")
-                except (OSError, COMError):
-                    if kind != "cli":
-                        raise
-                    regions = []
-                if kind == "cli" and not regions:
-                    regions = console_line_boxes(view, raw, start, end)
-                for region in regions:
+                for region in boxes(view, raw, start, end):
                     visible = clip(region, viewport)
                     if visible:
                         yield visible
