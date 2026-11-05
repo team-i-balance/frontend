@@ -47,3 +47,10 @@ else:
 
         def stop(self):
             pass
+
+if sys.platform == "darwin":
+    from . import mac_clipboard as _clipboard
+    clipboard_sequence = _clipboard.clipboard_sequence
+    get_clipboard_text = _clipboard.get_clipboard_text
+    set_clipboard_text = _clipboard.set_clipboard_text
+    own_window_in_foreground = _clipboard.own_window_in_foreground

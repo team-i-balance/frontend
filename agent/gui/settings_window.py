@@ -59,6 +59,12 @@ class SettingsWindow(tk.Toplevel):
                                ("복사한 프롬프트 자동 점검", self.v_clip, self._toggle_clip),
                                ("Windows 시작 시 자동 실행", self.v_auto, self._toggle_auto)):
             theme.Switch(box.body, text, var, cmd).pack(anchor="w", pady=(0, px(12)))
+        if __import__("sys").platform == "darwin":
+            from ..system import mac_clipboard
+            detail = "복사한 텍스트를 이 PC에서 확인합니다. macOS의 붙여넣기 허용 요청을 확인하세요."
+            if not mac_clipboard.available():
+                detail = "클립보드 자동 점검을 사용할 수 없어요. macOS 의존성을 설치하거나 직접 입력하세요."
+            theme.label(box.body, detail, "caption12", theme.TEXT_SECONDARY, wraplength=px(300)).pack(fill="x")
         self.btn_pause = theme.Button(box.body, "30분 일시정지", lambda: app.post("pause"), size="sm")
         self.btn_pause.pack(anchor="w")
 
