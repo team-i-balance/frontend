@@ -14,3 +14,5 @@ defusedxml==0.7.1
 numpy>=1.24,<3
 onnxruntime>=1.17,<2
 tokenizers>=0.20,<1
+
+pyobjc-framework-Cocoa>=10,<13; sys_platform == "darwin"
