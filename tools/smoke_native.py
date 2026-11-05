@@ -201,9 +201,12 @@ def main():
                 row = (rx0 + rx1) // 2, (ry0 + ry1) // 2
                 cx0, cy0, cx1, cy1 = first.tx, first.ty, first.tx + first.w, first.ty + first.h
                 assert cx1 <= x or cx0 >= r or cy1 <= y or cy0 >= b, "first chip covers the word"
+                capture(f"chip-open-{sys.argv[1] if len(sys.argv) > 1 else 'chrome'}")
                 mouse(*row, True)
-                time.sleep(0.08)
-                mouse(*row, False)
+                try:
+                    until(lambda: overlay.pressed, "mouse down on the chip")
+                finally:
+                    mouse(*row, False)
                 until(lambda: overlay.chip is not None and len(overlay.chip.cards) == 2, "next chip opened")
                 assert overlay.chip.cards[0].selected == 0
                 assert win_foreground_kept(hwnd), "clicking a chip took focus from the browser"
