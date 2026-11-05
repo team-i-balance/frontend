@@ -35,6 +35,7 @@
 - [ ] K3 핸드오프가 도착한 화면부터 구현. `agent/gui/theme.py`는 `tokens.json` 기준으로 교체
   — *다크 디자인 설정(보안팀 콘솔 v17 토큰)을 `theme.py`에 적용하고 모든 창을 바꿈 (2026-11-05). Pretendard 동봉. 화면별 핸드오프가 오면 배치를 맞춘다*
 - [ ] K4 기존 항목 진행: P0.11 → 2.6·4.5·7·9 → Phase 2(R3) → 12~17 → Phase 4(R6) → 26 → 27. 서명 없는 exe와 키보드 훅은 백신·EDR이 키로거로 오인할 수 있으니 27에서 함께 확인
+- [ ] K5 백엔드 대조 태스크 B1~B9 (아래 "백엔드 머지 PR 대조"). B1·B6·B4가 우선이고, K1~K4와의 순서는 사용자가 정한다
 - 보류: 브라우저 확장 항목(1, 5, 6, 8.2, 25)은 오버레이 방식으로 대체될 수 있다. 유지 여부는 K1 결과를 보고 사용자가 정한다
 
 ### 트랙 간 메모
@@ -85,6 +86,101 @@
   - SLM: 서버에서 실행 (README 목표도 "사내 서버"). 정책 규칙은 서버가 관리
   - slm 레포는 Windows에서 클론이 안 된다: `data/train_raw/con.*` 파일명의 `CON`이 Windows 예약 이름 → 이름 변경 필요 (slm 레포 담당)
 
+## 백엔드 머지 PR 대조 (2026-11-05, backend main `62849e3`)
+
+backend `main`은 push하면 팀 서버에 자동 배포된다 (GitHub Actions). 머지된 PR 18개를 앱과 하나씩 비교했다.
+backend는 이 환경에서 띄워 확인했고, 실제 팀 서버는 개발 환경에서 닿지 않는다.
+
+| backend PR | 내용 | 앱 상태 | 태스크 |
+|---|---|---|---|
+| #1 | 이벤트 로그 DB·큐 분류 (`/logs/*`) | 서버 처리분은 `/process/decide`가 기록. 이 PC에서만 처리한 건은 서버에 안 가고, 이 PC 큐 이름·규칙이 다름 | B7, B8 |
+| #2 | local_ai 가명화·정형 규칙 | 서버 처리에서 사용. 비밀값 등급이 이 PC(S)와 서버(C)가 다름 | B5, B6 |
+| #3 | XLSX 보호본 (`file_sanitizer`) | `agent/files/xlsx`로 가져옴. main과 코드가 같음 | — |
+| #4 | `/process` → `/decide` 기록 | 사용 중. 응답의 `event.id`는 버림 | B1 |
+| #5 | 탐지 전처리 (전각 숫자, 유니코드 대시, 제로폭 문자) | 이 PC 규칙에 없음 | B6 |
+| #6 | SLM 기밀·비정형 개인정보 | 새 자리표시(`민감정보`·`기밀`·`사내정보`)를 모르고, 등급 C 문구가 비밀값 기준 | B4 |
+| #7 | XLSX 업로드 API | 서버 파일 검사로 반영 (`669c00c`) | — |
+| #8 | 변환·재검사 반복 | `remaining_count` 표시 중. 이 PC 처리에는 반복 없음 | 15 |
+| #9 | 서버 시작 때 SLM 미리 로드 | 설정 창에 SLM 준비 상태 표시 (`ecffb9a`) | B4 |
+| #15 | 정책 번들(DSSE)·적용 보고·모델 매니페스트 | 없음 | B2, B3 |
+| #16 | `/health` 탐지 범위 | 반영 (`ecffb9a`) | — |
+| #17 | 보호본 1회 다운로드 | 반영 (`669c00c`) | — |
+| #18 | 원격 수집·HF 다운로드 차단 | 반영 (`ecffb9a`) | — |
+| #19 | 이름·주소 끝 조사 떼기 | 반영 (`ecffb9a`) | — |
+| #28 | 실제 위반 = 민감·기밀 + 원문 전송 + 확실한 탐지 | 원문 전송을 `revert_original`로 보냄. 이 PC 큐 규칙은 다름 | B1, B8 |
+| #33 | 보안팀 사건 검토 API | 콘솔 쪽. 앱 할 일 없음 (사유 제출은 B1) | — |
+| #35 | 정책 버전별 적용 현황·배포 이력 | PC가 적용 결과를 보내야 집계됨 | B2 |
+| #37 | 원문 전송 뒤 직원 사유 제출 | 제출 화면 없음 | B1 |
+
+열린 PR #31(정형 규칙 추가)·#34(시험 이벤트 표시)·#36(이벤트에 기기·직원·대상 AI·항목별 결정)은 머지되면 B9.
+우선순위: B1·B6·B4 → B2 → B5·B7 → B3·B8 → B9.
+
+- [ ] B1 원문 전송: 서버와 행동 맞추기 + 나중에 사유 내기 (backend#28, #37)
+  - 서버: 실제 위반 = 민감·기밀 + 원문 전송(`send_as_is`·`revert_original`) + 확실한 탐지. 사유 대기(`reason_requested_at`)는
+    `sensitive_S` + `send_as_is` + 사유 없음일 때만 생기고, 직원은 `POST /events/{event_id}/reason {reason, text(1~500자)}`로 낸다.
+    `docs/event-reason-api.md`: "직원 앱의 제출 화면은 각 클라이언트에서 구현"
+  - 지금 앱: 점검 창 '원문 그대로 사용'은 민감·기밀이면 `revert_original`을 보내서(`gui/server_review.py` `on_original`) 사유 대기가 생기지 않는다.
+    `/decide` 응답의 `event.id`·`reason_requested_at`을 버리고(`server/client.py` `DecideResult`), 사유 창(`ReasonDialog`)은 코드만 고른다
+  - 할 일: 전체 원문 전송을 `send_as_is`로 보낼지 backend와 정한다 (아니면 backend가 `revert_original`도 사유 대기에 넣는다).
+    사유 대기 건은 이벤트 ID만 이 PC에 남기고(본문 없음), 트레이·설정 창에 "사유 대기 N건"과 제출 창(사유 코드 + 짧은 설명)을 둔다.
+    409 `REASON_NOT_REQUESTED`·`REASON_ALREADY_SUBMITTED`를 안내하고, 응답을 못 받았으면 같은 내용으로 다시 보낸다
+  - 완료 기준: 민감 원문을 사유 없이 보내면 대기 목록에 뜨고, 제출하면 서버 큐가 `violation_candidate`·`detection_improve`로 바뀐다
+    (가짜 서버 테스트 + 로컬 backend 확인)
+- [ ] B2 정책 번들 받기·검증·적용·적용 보고 (backend#15, #35) — Phase 5 20을 backend 명세로 구체화
+  - 서버: `GET /policy/latest`(DSSE 봉투, `ETag`·304). 검증 7단계 `bad_type`·`bad_signature`·`unsupported_schema`·`wrong_org`·
+    `rollback`·`expired`·`model_mismatch`, 실패하면 쓰던 정책 유지. `POST /policy/ack {device_id, version, status: applied|rejected, reason}`가
+    콘솔 "PC 적용 현황"이 된다. 정책 `types`(콘솔 항목명 → 켬/끔)를 탐지에 반영. 신뢰 공개키 `trust/<keyid>.pub`(MDM 설치), 조직 `POLICY_ORG`
+  - 지금 앱: 정책을 받지 않는다. 조직 베이스는 `assets/demo_base.json`, 탐지 유형은 고정, 기기 ID 없음
+  - 할 일: 기기 ID(설정에 한 번 만들어 저장), 시작할 때와 주기적으로 `If-None-Match`로 확인, Ed25519로 PAE 바이트 서명을 확인한 뒤에만
+    JSON 해석, 마지막 정상 버전 저장(되돌림 방지), 결과 ack, 설정 창에 정책 버전·상태.
+    `types` → 이 PC 탐지(규칙·사전·모델)와 서버로 보내기 전 확인에 반영: 이름→name, 전화번호→phone, 이메일→email, 주소→address,
+    생년월일→dob, 계좌번호→account, 카드번호→card, 주민등록번호→rrn·frn·id_number, API 키·비밀번호·토큰→secret, 사업자번호→bizno,
+    나이→age, 프로젝트 코드명→codename (서버가 무시하는 나이·프로젝트 코드명도 이 PC는 적용할 수 있다)
+  - 정할 것: 신뢰 키 배포 위치(MDM이 쓰는 `%ProgramData%` 경로 또는 빌드에 고정), Ed25519 의존성(`cryptography` 또는 PyNaCl)
+  - 완료 기준: 로컬 backend `publish` → 앱 적용 → `/policy/{version}/acks`에 applied. 서명을 바꾼 번들은 `bad_signature`로 거부되고 이전 정책 유지
+- [ ] B3 설치 모델 해시·모델 매니페스트 (backend#15)
+  - 서버: `GET /policy/model/latest` → 서명된 `{name, version, sha256, url}`. 정책 검증 7단계가 `model.sha256`과 설치 모델을 비교
+  - 지금 앱: AEGIS 모델은 사용자가 고른 폴더. 해시를 계산하지 않고, 받는 경로도 없다
+  - 할 일: `model.onnx`의 SHA-256을 계산해 설정 창에 보이고 B2 `model_mismatch`에 쓴다. 매니페스트로 모델을 받을지는 결정 필요
+    (받는다면 서명·해시를 확인한 뒤 `%LOCALAPPDATA%\KPGuard\models\aegis`에 설치)
+- [ ] B4 SLM 자리표시·등급 C 표시 (backend#6, #9)
+  - 서버: 자리표시에 `[민감정보_n]`(SENSITIVE, C), `[기밀_n]`(CONFIDENTIAL, C), `[사내정보_n]`(INTERNAL, S)가 생겼다.
+    복원하지 않는 것은 API키·토큰·비밀번호뿐 (`local_ai/pseudonym.py` `_NO_RESTORE`)
+  - 지금 앱: `server/align.py` `LABEL_TYPE`·`LABEL_CATEGORY`에 없어 기록이 `other`로 남는다. 서버 등급 C면 점검 창이
+    "비밀값을 포함해… API 키·토큰·비밀번호가 있어요… 답변을 복원해도 되돌리지 않아요"라고 하는데, SLM 기밀·민감정보는 비밀값이 아니고 복원도 된다
+  - 할 일: 라벨 3개를 유형·색 묶음에 넣고, 등급 C 문구를 원인별(비밀값 / 기밀·민감 내용)로 나눈다. 가짜 서버가 이 라벨을 내도록 해 테스트.
+    SLM 예열 중(`slm_ready=false`)에 요청이 시간 초과되면 "서버가 모델을 준비하는 중"으로 안내
+- [ ] B5 비밀값 등급을 서버와 맞추기 (backend#2, #3, #7)
+  - 서버: API 키·접근 토큰·비밀번호는 `confidential_C`. 파일에 하나라도 있으면 `BLOCKED / CONFIDENTIAL`
+  - 지금 앱: 이 PC 처리에서는 비밀값이 S(`[비밀값]` 태그)라 점검 창은 "민감"이고, 이 PC 파일 검사는 `api_key=[비밀값]`으로 가린 보호본을
+    만든다(READY, 2026-11-05 확인). 같은 파일이 서버 처리에서는 막힌다
+  - 할 일: 이 PC 처리도 비밀값을 C로 보고 파일은 막을지 팀과 정해 맞춘다 (아니면 차이를 화면과 문서에 밝힌다). 테스트 추가
+- [ ] B6 이 PC 규칙을 서버 전처리·규칙과 맞추기 (backend#5, #2) — Phase 1 2와 함께
+  - 서버: 검사 전에 전각 숫자(０-９)→숫자, 숫자 사이 유니코드 대시→`-`, 숫자 안 제로폭 문자를 정리하고 원문 위치로 되돌린다
+    (`local_ai/preprocessing.py`). 비밀값 규칙에 SendGrid `SG.…`, `Authorization: Bearer` 값, 셸 기본값 `${VAR:-값}`의 값만
+  - 지금 앱: 전각·유니코드 대시·제로폭 문자를 넣은 전화번호·주민번호, SendGrid 키, Bearer 토큰을 못 잡는다 (2026-11-05 확인).
+    서버 처리 모드에서도 복사한 글을 창에 띄울지는 이 규칙이 정하므로, 이런 글은 서버 검사까지 가지 않는다
+  - 할 일: 정규화 + 위치 되돌리기를 `detect/pipeline.py`·`rules.py`에 넣고, 빠진 패턴을 더하고, backend 테스트 사례를 옮긴다
+  - 완료 기준: 위 사례가 이 PC 규칙과 클립보드 자동 점검에서 잡힌다
+- [ ] B7 이 PC에서만 처리한 기록을 서버로 보내기 (backend#1, #4 · backend#32와 함께)
+  - 서버: `POST /logs/events`(원문 없는 메타데이터 `EventIn`) → 콘솔 큐·통계
+  - 지금 앱: 이 PC 처리 모드의 선택, 이 PC가 막은 기밀 표기·사내 소스코드, 파일 검사 결과는 이 PC SQLite에만 있다.
+    서버 처리 모드에서도 서버에는 `/decide` 기록만 가고, 이 PC의 기밀(C) 판정은 남지 않는다
+  - 할 일: 앱 행동·유형을 서버 값으로 바꿔 보낸다 (sent_sanitized→send_transformed, sent_original→send_as_is,
+    cancelled·route_internal→cancel, name→NAME 등). 연결이 안 되면 모아 두었다 다시 보내고, `/decide`가 이미 기록한 건은 보내지 않는다.
+    파일 기록은 backend#32와 겹치지 않게 정한다
+- [ ] B8 이 PC 큐 이름·규칙을 서버와 맞추기 (backend#1, #28)
+  - 서버 큐: `pre_warning`·`detection_improve`·`violation_candidate`·`real_violation`.
+    실제 위반 = 등급 O 아님 + 원문 전송 + `detection_confidence == high`(모델+규칙)
+  - 지금 앱(`events/log.py`): `pre_warning`·`tuning`·`candidate`·`violation`·`missed`·`regression`,
+    실제 위반 = `sent_original` + 최고 신뢰도 0.85 이상 (등급·검사 범위를 보지 않음)
+  - 할 일: 통계·JSONL 내보내기의 큐 이름과 규칙 3을 서버와 같게. 이 PC에만 있는 `missed`·`regression`은 남기고 문서에 밝힌다
+- [ ] B9 열린 backend PR이 머지되면
+  - #36: `/logs/events`(`/decide`에도 들어오면 그쪽도)에 `device_id`(B2)·`target_ai`·항목별 `items[]`(유형·결정·사유·`value_hash`·가린 미리보기)를
+    보낸다. 점검 창의 항목별 되돌리기 사유가 여기에 들어간다. 대상 AI는 붙여넣을 창을 알아야 해서 방법을 정해야 한다
+  - #34: 시험 이벤트에는 `"test": true`. `/process/decide`에는 이 표시가 없으니 배포 서버로는 결정까지 가는 시험을 하지 않는다 (로컬 backend 사용)
+  - #31: 서버 정형 규칙(주민·외국인번호, 카드, 계좌, IP, 비밀번호, 생년월일)과 이 PC 규칙을 비교한다 (B6)
+
 ---
 
 ## Phase 0 — 일반 사용자 GUI 흐름 프로토타입 (데스크톱)
@@ -128,7 +224,7 @@
   - [ ] 1.2 메시지 프로토콜: 4바이트 길이 prefix + JSON, 요청 ID 기반 응답 매칭
   - [ ] 1.3 1MB 제한 대응 청크 전송
   - [ ] 1.4 background service worker 연결·재연결·헬스체크
-- [ ] 2. 0단계 규칙 엔진 (§3) — *P0.5에서 경량 구현, 테스트·정밀화 남음*
+- [ ] 2. 0단계 규칙 엔진 (§3) — *P0.5에서 경량 구현, 테스트·정밀화 남음. 서버 전처리·비밀값 규칙과 맞추기는 B6*
   - [x] 2.1 Span 데이터 구조
   - [x] 2.2 주민/외국인등록번호 (생년월일·성별 자리, 체크섬 가산점)
   - [x] 2.3 카드(Luhn), 사업자번호(검증식), 계좌(문맥), 전화(국번), 이메일, IP
@@ -168,6 +264,8 @@
 - [ ] 13. 조직 베이스 (Aho-Corasick 코드네임, 명단 해시, MinHash 지문, 등급 표기, 태그/차단 분기) — *데모용 평문 목록만 P0에 있음*
 - [ ] 14. 조합·누적 재식별 (조합 규칙, 누적 목록, 마지막 조각, 삭제 권장)
 - [ ] 15. 변환 엔진 v2 (일반화 단계 테이블, 태그, 조사 보정 고도화, 잔여 위험 루프, 대화 연속성)
+  — *잔여 위험 루프는 backend `local_ai/sensitive_loop.py`(backend#8: 기본 3회까지 반복, 비밀값·기밀이 있거나 재검사에서 나오면 변환하지 않고 멈춤,
+  생년월일은 연도로 일반화) 참고*
 - [ ] 16. 답변 복원 v2 (짧은 변형 문맥, 숫자 정규화, 복사 가로채기)
 - [ ] 17. 놓친 정보 신고 — *P0.8에서 데스크톱 버전 완료*
 
@@ -177,8 +275,8 @@
 - [ ] 19. 전송 후 재검사, 답변 역검사, 카나리
 
 ## Phase 5 — 조직 모드
-- [ ] 20. 정책 번들 (Ed25519, locked, 승인 AI 목록, 규칙 매칭, 기본 템플릿)
-- [ ] 21. 로그 고도화 (SealedBox, 회피 탐지, 반복 경고, 수용률·되돌림률)
+- [ ] 20. 정책 번들 (Ed25519, locked, 승인 AI 목록, 규칙 매칭, 기본 템플릿) — *backend DSSE 명세·`/policy/*`에 맞춘 받기·검증·적용·보고는 B2*
+- [ ] 21. 로그 고도화 (SealedBox, 회피 탐지, 반복 경고, 수용률·되돌림률) — *서버 `/logs/events`로 보내기는 B7, 서버는 `/logs/export`로 암호화 내보내기를 한다*
 - [ ] 22. 사내 AI 연계 (데모 페이지, 새 탭 + 입력 채우기)
 - [ ] 23. 보안팀 도구 (127.0.0.1 대시보드, 복호화, 규칙 만들기, 서명·내보내기)
 
