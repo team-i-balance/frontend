@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "KP Guard - ChatGPT 입력창 감지",
+  "version": "0.1.0",
+  "description": "ChatGPT 입력창을 감지하고 상태를 표시합니다.",
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
