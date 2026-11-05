@@ -15,5 +15,6 @@ numpy>=1.24,<3
 onnxruntime>=1.17,<2
 tokenizers>=0.20,<1
 
+# macOS 시스템 연동
 pyobjc-framework-Cocoa>=10,<13; sys_platform == "darwin"
 pyobjc-framework-Quartz>=10,<13; sys_platform == "darwin"
