@@ -10,7 +10,7 @@ import objc
 from CoreFoundation import CFHash
 
 from ..server.client import MAX_TEXT
-from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site
+from .source import OWN_WINDOW, Draft, Keys, Snapshot, clip, composer, row_span, sends, site, terminal_draft
 
 try:
     import Quartz as Q
@@ -30,6 +30,8 @@ BROWSERS = {
     "com.vivaldi.vivaldi",
     "com.operasoftware.opera",
 }
+# Claude Code / Codex CLI prompts in a terminal.
+TERMINAL_APPS = {"com.apple.terminal", "com.googlecode.iterm2"}
 
 
 def attribute(element, name):
@@ -166,14 +168,14 @@ class Reader:
         pid, bundle = app.processIdentifier(), str(app.bundleIdentifier()).lower()
         if pid == os.getpid():
             return OWN_WINDOW
-        if bundle not in BROWSERS:
+        if bundle not in BROWSERS | TERMINAL_APPS:
             self.reset()
             return None
         if pid != self.current_pid:
             self.reset()
             self.current_pid, self.app = pid, A.AXUIElementCreateApplication(pid)
             A.AXUIElementSetMessagingTimeout(self.app, 0.3)
-            if not bundle.startswith(("com.apple.", "org.mozilla.")):
+            if bundle in BROWSERS and not bundle.startswith(("com.apple.", "org.mozilla.")):
                 A.AXUIElementSetAttributeValue(self.app, "AXManualAccessibility", True)
         focus = attribute(self.app, "AXFocusedUIElement")
         if focus is None:
@@ -182,6 +184,9 @@ class Reader:
         window = attribute(self.app, "AXFocusedWindow")
         if window is None:
             return None
+        if bundle in TERMINAL_APPS:
+            self.reset()
+            return self.terminal(pid, window, chain)
         docs = [n for n, role in chain if role == "AXWebArea"]
         typing = False  # Enter is guarded only while the keyboard focus is in the composer itself
         if docs:
@@ -216,8 +221,26 @@ class Reader:
             return self.snapshot(pid, site(url), window, field, raw, 0, Draft.plain(raw), url, typing)
         return None
 
+    def terminal(self, pid, window, chain):
+        """The editable prompt of a Claude Code / Codex CLI in the focused terminal. Never the scrollback."""
+        field = next((n for n, role in chain if role == "AXTextArea"), None)
+        if field is None:
+            return None
+        visible = unpack(attribute(field, "AXVisibleCharacterRange"), A.kAXValueCFRangeType)
+        if visible is None or not 0 < visible[1] <= 100_000:
+            return None
+        raw = parameter(field, "AXStringForRange", ax_range(visible[0], visible[1]))
+        if not isinstance(raw, str):
+            return None
+        draft = terminal_draft(raw, attribute(window, "AXTitle") or "")
+        if draft is None:
+            return None
+        keys = Keys(type=lambda text: activate(pid) and type_text(text),
+                    back=lambda times: activate(pid) and press(51, times))  # kVK_Delete
+        return self.snapshot(pid, draft.app, window, field, raw, visible[0], draft, keys=keys)
+
     @staticmethod
-    def snapshot(pid, kind, window, field, raw, base, draft, url="", focused=True):
+    def snapshot(pid, kind, window, field, raw, base, draft, url="", focused=True, keys=None):
         viewport = clip(boundary(field), boundary(window))
 
         offsets = None
@@ -253,7 +276,17 @@ class Reader:
             return type_text(new) if new else press(51)
 
         bounds = viewport or ()
-        return Snapshot((pid, kind, CFHash(window), CFHash(field), url), draft, ranges, replace, bounds, focused)
+        if keys is not None and viewport is not None:
+            # A CLI: chips sit beside its prompt block, not beside the whole terminal.
+            offsets = utf16_offsets(raw)
+            first, last = row_span(raw, *draft.rows)
+            parts = list(boxes(field, base + offsets[first], base + offsets[max(first + 1, last)]))
+            block = clip((viewport[0], min(p[1] for p in parts), viewport[2], max(p[3] for p in parts)),
+                         viewport) if parts else None
+            bounds = block or viewport
+        # A terminal prompt has no addressable caret: it is edited only through keys (source.retype).
+        edit = replace if keys is None else None
+        return Snapshot((pid, kind, CFHash(window), CFHash(field), url), draft, ranges, edit, bounds, focused, keys)
 
 
 class Paint:
@@ -264,8 +297,9 @@ class Paint:
     def top():
         return K.NSScreen.screens()[0].frame().size.height
 
-    def draw(self, regions):
-        # Signal blue #3D7EF7: a light fill plus a 2px underline per range.
+    def draw(self, regions, solid=False):
+        # Signal blue #3D7EF7: a light fill plus a 2px underline per range. Terminal.app does not pause on a
+        # click, so the panels always pass clicks through (solid is for consoles on Windows).
         shapes = []
         for x, y, r, b in regions:
             shapes += [(x, y, r, b, 0.25), (x, max(y, b - 2), r, b, 0.92)]
@@ -370,7 +404,7 @@ def press(code, times=1):
 
 
 class EnterGuard:
-    """While highlights remain, drop a plain Return (send) going to that editor's app. Shift+Return still passes.
+    """While highlights remain, drop a Return that may send to that editor's app. Shift+Return still passes.
 
     target() returns the guarded process id or None. blocked() runs on the tap thread and must only post.
     Requires the same Accessibility permission as the highlights.
@@ -416,7 +450,10 @@ class EnterGuard:
                 return event
             if kind == Q.kCGEventKeyDown:
                 target = self.target()
-                if not target or Q.CGEventGetFlags(event) & Q.kCGEventFlagMaskShift:
+                flags = Q.CGEventGetFlags(event)
+                # Shift alone adds a line. Plain, Control or Command+Return may send.
+                if not target or not sends(flags & Q.kCGEventFlagMaskShift, flags & Q.kCGEventFlagMaskControl,
+                                           flags & Q.kCGEventFlagMaskCommand):
                     return event
                 pid = Q.CGEventGetIntegerValueField(event, Q.kCGEventTargetUnixProcessID)
                 if not pid:

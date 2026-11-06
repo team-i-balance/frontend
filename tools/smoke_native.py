@@ -1,7 +1,8 @@
 """Type into a real browser window, wait for native marks, and click through them.
 
-Scope (2026-11-05): Claude in the browser only. The claude.ai origin, an unrelated origin and the detector
-are local fixtures. No extension or browser pairing. Run on an interactive Windows desktop.
+Scope: Claude (claude.ai) and Codex (chatgpt.com/codex) in the browser. Those pages, a ChatGPT chat page
+(not read), an unrelated origin and the detector are local fixtures. No extension or browser pairing.
+Run on an interactive Windows desktop.
 """
 
 import sys
@@ -141,20 +142,23 @@ def main():
                 channel=sys.argv[1] if len(sys.argv) > 1 else "chrome", headless=False
             )
             ctx = browser.new_context(no_viewport=True)
+            # ChatGPT·Codex composer: a ProseMirror div with the prompt-textarea id and no label.
+            codex = '<div id="prompt-textarea" role="textbox" aria-multiline="true" contenteditable="true" translate="no" class="ProseMirror"></div>'
             documents = {
-                "claude.ai": '<div role="textbox" aria-multiline="true" aria-label="Reply to Claude" contenteditable="true" class="tiptap ProseMirror"></div>',
-                "example.org": '<textarea id="prompt-textarea"></textarea>',
+                "https://claude.ai/new": '<div role="textbox" aria-multiline="true" aria-label="Reply to Claude" contenteditable="true" class="tiptap ProseMirror"></div>',
+                "https://chatgpt.com/codex": codex,
+                "https://chatgpt.com/c/123": codex,  # a ChatGPT chat: not read
+                "https://example.org/test": '<textarea id="prompt-textarea"></textarea>',
             }
+            watched = {"https://claude.ai/new": "claude", "https://chatgpt.com/codex": "codex"}
 
             def fixture(route):
-                from urllib.parse import urlsplit
-
-                host = urlsplit(route.request.url).hostname
-                if host in documents and route.request.resource_type == "document":
+                url = route.request.url.split("?")[0]
+                if url in documents and route.request.resource_type == "document":
                     content = (
                         "<title>KP Native Fixture</title><body><button>outside</button>"
                         "<style>textarea,[contenteditable] {display:block;margin:50px;width:480px;min-height:75px;font:20px sans-serif}</style>"
-                        + documents[host]
+                        + documents[url]
                     )
                     route.fulfill(content_type="text/html", body=content)
                 else:
@@ -162,20 +166,21 @@ def main():
 
             ctx.route("**/*", fixture)
             page = ctx.new_page()
+            channel = sys.argv[1] if len(sys.argv) > 1 else "chrome"
             for host in documents:
                 print(f"testing native browser: {host}", flush=True)
-                page.goto(f"https://{host}/test")
+                page.goto(host)
                 page.bring_to_front()
                 field = page.locator("textarea,[contenteditable]")
                 field.click()
                 hwnd = activate_fixture(page, field) if sys.platform == "win32" else None
                 before = len(app.revisions)
                 type_direct(page, hwnd, "sample ")
-                if host == "example.org":
+                if host not in watched:
                     until(lambda: not overlay.shown.marks, "hide after navigation")
                     time.sleep(0.3)
-                    assert len(app.revisions) == before, "unrelated origin reached the detector"
-                    break
+                    assert len(app.revisions) == before, f"{host} reached the detector"
+                    continue
                 until(
                     lambda: any("sample" in revision for revision in app.revisions[before:]),
                     "direct typing reached preview",
@@ -201,7 +206,7 @@ def main():
                 row = (rx0 + rx1) // 2, (ry0 + ry1) // 2
                 cx0, cy0, cx1, cy1 = first.tx, first.ty, first.tx + first.w, first.ty + first.h
                 assert cx1 <= x or cx0 >= r or cy1 <= y or cy0 >= b, "first chip covers the word"
-                capture(f"chip-open-{sys.argv[1] if len(sys.argv) > 1 else 'chrome'}")
+                capture(f"chip-open-{watched[host]}-{channel}")
                 mouse(*row, True)
                 try:
                     until(lambda: overlay.pressed, "mouse down on the chip")
@@ -214,7 +219,7 @@ def main():
                 while time.monotonic() < settle:
                     root.update()
                     time.sleep(0.01)
-                capture(f"chip-{sys.argv[1] if len(sys.argv) > 1 else 'chrome'}")
+                capture(f"chip-{watched[host]}-{channel}")
                 # Click in the page margin above the editor, outside the chip.
                 margin = x - 24, y - 16
                 mouse(*margin, True)

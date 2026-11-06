@@ -57,9 +57,9 @@ class Desktop:
 
 
 class SeenActions(BrowserActions):
-    def preview(self, text, channel=None):
+    def preview(self, text, channel=None, target=None):
         self.app.revisions.append(text)
-        return super().preview(text, channel)
+        return super().preview(text, channel, target)
 
 
 def check_editor(context, peer, desktop, site, use_shell):

@@ -580,7 +580,7 @@ class App:
             if self.settings_win:
                 self.settings_win.v_auto.set(autostart.is_enabled())
         if background and self.tray:
-            self.tray.notify("브라우저의 Claude 입력창에서 감지된 단어를 클릭해 점검할 수 있습니다.")
+            self.tray.notify("Claude·Codex 입력창(브라우저·터미널 CLI)에서 감지된 단어를 클릭해 점검할 수 있습니다.")
 
     def quit(self) -> None:
         self.overlay.close()

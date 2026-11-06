@@ -12,12 +12,14 @@ from unittest.mock import Mock
 from agent import config
 from agent.browser.actions import BrowserActions
 from agent.gui import theme
-from agent.overlay.controller import NativeOverlay, channel_of, make_frame
-from agent.overlay.source import Draft, Snapshot
+from agent.overlay.controller import NativeOverlay, _edit_failed, channel_of, make_frame
+from agent.overlay.source import Draft, Keys, Snapshot
 from agent.server.client import DecideResult, ProcessResult
 
 PHONE = "010-2345-6789"
 KEY = (77, "claude.ai", (1, 2), "https://claude.ai/new")
+CODEX_WEB = (78, "chatgpt.com/codex", (3,), "https://chatgpt.com/codex")
+CODEX_CLI = (79, "cli:codex", (4,), "")
 
 
 class FakeApp:
@@ -35,6 +37,9 @@ class FakeApp:
 
     def post(self, cmd, *args):
         self.calls.put((cmd, args))
+
+    def decide_context(self, target_ai=None):
+        return {"user_id": "u1", "target_ai": target_ai}
 
     def pump(self, until, limit=3.0):
         end = time.monotonic() + limit
@@ -67,7 +72,32 @@ class FakeReader:
         return Snapshot(KEY, Draft.plain(self.text), lambda a, b: [], replace)
 
 
-class OverlayChipTests(unittest.TestCase):
+class FakeTerminal:
+    """A CLI prompt read from a console: no replace(), only keystrokes. Typed spaces stay at the end."""
+
+    def __init__(self, text, key=CODEX_CLI):
+        self.buffer, self.key, self.typed = text, key, []
+
+    @staticmethod
+    def focus(key):
+        return True
+
+    def sample(self):
+        def type_(text):
+            self.typed.append(text)
+            self.buffer += text
+            return True
+
+        def back(times):
+            self.typed.append("\b" * times)
+            self.buffer = self.buffer[:-times] if times else self.buffer
+            return True
+
+        return Snapshot(self.key, Draft.plain(self.buffer.rstrip(" ")), lambda a, b: [], None, (), True,
+                        Keys(type_, back))
+
+
+class OverlayBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if sys.platform == "darwin":
@@ -119,14 +149,16 @@ class OverlayChipTests(unittest.TestCase):
             self.root.after_cancel(overlay.timer)
         overlay._dismiss()
 
-    def frame(self, text):
+    def frame(self, text, key=KEY):
         time.sleep(0.05)  # let a just-stopped reader thread finish its last pass before the test sets the frame
-        spans = self.app.browser_actions.preview(text, channel_of(KEY))["spans"]
-        snap = Snapshot(KEY, Draft.plain(text), lambda a, b: [(100 + a * 8, 100, 100 + b * 8, 120)])
+        spans = self.overlay._check(text, key)["spans"]
+        snap = Snapshot(key, Draft.plain(text), lambda a, b: [(100 + a * 8, 100, 100 + b * 8, 120)])
         frame = make_frame(snap, spans)
         self.overlay.frame = frame
         return frame
 
+
+class OverlayChipTests(OverlayBase):
     def test_first_chip_has_only_mask_and_keep(self):
         frame = self.frame(f"고객 {PHONE} 연락")
         self.overlay._open(frame, frame.marks[0])
@@ -203,6 +235,50 @@ class OverlayChipTests(unittest.TestCase):
         self.overlay.live = Mock(update=lambda key, text="": [], error=False)
         self.overlay._sample(Reader(True))  # 하이라이트가 없어지면 막지 않는다
         self.assertIsNone(self.overlay.target)
+
+
+class TerminalAndCodexTests(OverlayBase):
+    """The same cascade over a CLI prompt in a terminal and over Codex in the browser."""
+
+    def test_first_chip_has_only_mask_and_keep(self):
+        frame = self.frame(f"고객 {PHONE}", CODEX_CLI)
+        self.overlay._open(frame, frame.marks[0])
+        self.assertEqual(self.overlay.chip.chip_labels(), ["마스킹", "원문유지"])
+
+    def test_terminal_mask_retypes_the_last_line_and_records_the_cli(self):
+        text = f"고객 {PHONE} 연락"
+        frame = self.frame(text, CODEX_CLI)
+        self.overlay._open(frame, frame.marks[0])
+        self.overlay.chip.press("마스킹")
+        self.assertTrue(self.app.pump(lambda: "적용" in self.overlay.chip.chip_labels()))
+        self.overlay.chip.press("적용")
+        key, before, edits, done = self.overlay.edits.get_nowait()
+        terminal = FakeTerminal(text + " ")
+        self.assertTrue(self.overlay._edit(terminal, key, before, edits))
+        self.assertEqual(terminal.buffer, "고객 [전화번호_1] 연락 ")
+        self.assertNotIn(PHONE, "".join(terminal.typed))  # only the new tail is typed
+        done(True)
+        self.assertIn("되돌리기", self.overlay.chip.chip_labels())
+        self.assertEqual(self.overlay._check(terminal.buffer.rstrip(), CODEX_CLI)["spans"], [])
+        self.assertTrue(self.app.pump(lambda: self.server.decide.called))
+        self.assertEqual(self.server.decide.call_args.args[1:], ("send_transformed", None))
+        self.assertEqual(self.server.decide.call_args.kwargs["context"]["target_ai"], "Codex (CLI)")
+
+    def test_terminal_refuses_a_value_above_the_last_line(self):
+        text = f"고객 {PHONE}\n다음 줄"
+        terminal = FakeTerminal(text)
+        start = text.index(PHONE)
+        self.assertFalse(self.overlay._edit(terminal, CODEX_CLI, text, [[start, start + len(PHONE), "[x]"]]))
+        self.assertEqual((terminal.buffer, terminal.typed), (text, []))
+        self.assertIn("마지막 줄", _edit_failed(CODEX_CLI))
+
+    def test_codex_in_the_browser_records_codex(self):
+        frame = self.frame(f"고객 {PHONE} 연락", CODEX_WEB)
+        self.overlay._open(frame, frame.marks[0])
+        self.overlay.chip.press("원문유지")
+        self.overlay.chip.press("업무상 필요")
+        self.assertTrue(self.app.pump(lambda: self.server.decide.called))
+        self.assertEqual(self.server.decide.call_args.kwargs["context"]["target_ai"], "Codex (chatgpt.com/codex)")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest]  # 시연 범위: Windows의 브라우저 Claude만 검증 (macOS·ChatGPT·CLI 제외)
+        os: [windows-latest]  # 시연 범위: Windows의 브라우저 Claude·Codex와 콘솔의 Claude Code·Codex CLI (macOS 제외)
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -20,18 +20,21 @@ jobs:
       - name: Run desktop tests
         run: python -m unittest discover -s tests -t . -v
 
-      - name: Test native overlay on claude.ai in Chrome and Edge without extensions
+      - name: Test native overlay on claude.ai and Codex in Chrome and Edge without extensions
         if: runner.os == 'Windows'
         run: |
           python -m pip install "playwright>=1.52,<2"
           python tools/smoke_native.py chrome
           python tools/smoke_native.py msedge
+      - name: Test the chips over a Codex CLI prompt in a Windows console
+        if: runner.os == 'Windows'
+        run: python tools/smoke_terminal.py
       - name: Build Windows desktop executable
         if: runner.os == 'Windows'
         run: |
           python -m pip install -r requirements-build.txt
           python -m PyInstaller --noconfirm KPGuard.spec
-      - name: Run the packaged app against a claude.ai page in Chrome
+      - name: Run the packaged app against claude.ai in Chrome and a CLI prompt in a console
         if: runner.os == 'Windows'
         run: python tools/smoke_windows_package.py dist/KPGuard/KPGuard.exe
       - uses: actions/upload-artifact@v4

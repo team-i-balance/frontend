@@ -1,4 +1,4 @@
-"""입력창 칩 동작 (브라우저 확장·보호된 CLI 입력창·원래 입력창 오버레이가 함께 쓴다).
+"""입력창 칩 동작 (브라우저 확장과 원래 입력창 오버레이 — 브라우저·터미널 CLI — 가 함께 쓴다).
 
 칩 흐름 — 별도 창 없이 칩을 펼쳐 마무리한다:
   1. 하이라이트를 누르면 칩 두 개: 마스킹 / 원문유지
@@ -23,7 +23,7 @@ from ..detect import lexicon, rules
 from ..detect.pipeline import detect
 from ..detect.span import TYPE_LABELS
 from ..events.log import REASON_PRIORITY
-from ..overlay.source import SITES
+from ..overlay.source import SITES, TARGETS
 from ..sanitize.engine import Session, delete_end, make_items, replacement_for
 from ..sanitize.josa import fix_josa
 from ..sanitize.restore import restore
@@ -143,6 +143,7 @@ class DraftState:
     spans: list = field(default_factory=list)     # 마지막 미리보기 결과
     text: str = ""
     pending: bool = False                         # 기록하지 않은 결정이 있음
+    target: str = ""                              # 대상 AI (/process/decide target_ai). 비면 브라우저 Claude
     touched: float = field(default_factory=time.monotonic)
 
 
@@ -279,12 +280,14 @@ class BrowserActions:
         raise ChipError("지원하지 않는 동작입니다.")
 
     # ------------------------------------------------------------------ 입력 중 하이라이트
-    def preview(self, text, channel=None):
+    def preview(self, text, channel=None, target=None):
         result = self._detect_spans(text)
         if channel is None:
             return result
         with self.lock:
             draft = self._draft(channel)
+            if target:
+                draft.target = target
             covered = [r for r in _occurrences(text, draft.inserted)]
             spans = []
             for span in result["spans"]:
@@ -585,7 +588,8 @@ class BrowserActions:
                     failed = str(exc)
                 except Exception:  # 예외 메시지에 원문이 섞일 수 있어 보여 주지 않는다
                     failed = "서버에 기록하지 못했어요."
-            context = app.decide_context("Claude (claude.ai)") if hasattr(app, "decide_context") else None
+            target = draft.target or TARGETS["claude.ai"]
+            context = app.decide_context(target) if hasattr(app, "decide_context") else None
             for w in server_works:
                 masked_here = [p for p in w.pieces if p.server and p.key in w.applied]
                 # 원문으로 남긴 서버 자리표시. 하나라도 있으면 revert_original로 기록한다 (#25)
