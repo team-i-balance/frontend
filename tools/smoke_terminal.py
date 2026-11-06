@@ -108,6 +108,9 @@ def main():
     from agent.overlay.controller import NativeOverlay
 
     _dpi_aware()
+    # This script also uses UI Automation on the main thread (to find the console). Load it here first: two
+    # threads loading comtypes' generated UIA module at the same moment can fail the overlay's reader start.
+    win.u.GetRootControl()
     root = tk.Tk()
     root.withdraw()
     theme.setup(root)

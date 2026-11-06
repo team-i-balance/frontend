@@ -132,25 +132,30 @@ class NativeOverlay:
 
     # ------------------------------------------------------------------ 손쉬운 사용 스레드
     def _read(self, reader_class):
-        try:
-            with reader_class() as reader:
-                while not self.stop.is_set():
-                    try:
-                        with getattr(reader, "pool", nullcontext)():
-                            self._run_edits(reader)
-                            delay = self._sample(reader)
-                    except PermissionError:
-                        self.clear()
-                        self.status, delay = "손쉬운 사용 권한이 필요합니다.", 0.8
-                    except Exception:
-                        # Windows/tabs can disappear during a cross-process call. Never log a draft.
-                        reader.reset()
-                        self.clear()
-                        self.status, delay = "입력창 좌표 대기 중", 0.12
-                    self.stop.wait(delay)
-        except Exception:
-            self.clear()
-            self.status = "운영체제 화면 연동을 시작하지 못했습니다."
+        for attempt in range(4):
+            try:
+                with reader_class() as reader:
+                    while not self.stop.is_set():
+                        try:
+                            with getattr(reader, "pool", nullcontext)():
+                                self._run_edits(reader)
+                                delay = self._sample(reader)
+                        except PermissionError:
+                            self.clear()
+                            self.status, delay = "손쉬운 사용 권한이 필요합니다.", 0.8
+                        except Exception:
+                            # Windows/tabs can disappear during a cross-process call. Never log a draft.
+                            reader.reset()
+                            self.clear()
+                            self.status, delay = "입력창 좌표 대기 중", 0.12
+                        self.stop.wait(delay)
+                return
+            except Exception:
+                # Starting UI Automation can fail for a moment (e.g. while another thread loads it first): retry.
+                self.clear()
+                self.status = "운영체제 화면 연동을 시작하지 못했습니다."
+                if self.stop.wait(1.0 + attempt):
+                    return
 
     def clear(self):
         self.live.update(None)

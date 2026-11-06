@@ -134,6 +134,26 @@ class TerminalRetypeTests(unittest.TestCase):
         self.assertEqual(prompt.typed, [MARKER])
 
 
+class ReaderStartTests(unittest.TestCase):
+    def test_reader_start_is_retried_after_a_failure(self):
+        stop, starts = threading.Event(), []
+
+        class Reader:
+            def __enter__(self):
+                starts.append(1)
+                if len(starts) == 1:
+                    raise OSError("UI Automation not ready")
+                stop.set()  # the second start works; end the loop right away
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        host = SimpleNamespace(stop=stop, clear=lambda: None, status="")
+        NativeOverlay._read(host, Reader)
+        self.assertEqual(len(starts), 2)
+
+
 class LiveTests(unittest.TestCase):
     def begin(self):
         entered, release = threading.Event(), threading.Event()
