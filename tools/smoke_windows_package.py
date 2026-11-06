@@ -1,7 +1,8 @@
-"""Verify the built EXE in a real Chrome window showing a claude.ai composer (no extension).
+"""Verify the built EXE in a real Chrome window showing a claude.ai composer (no extension), then in a real
+console showing a Codex CLI prompt.
 
-Scope (2026-11-05): Claude in the browser only. The page and the team server are local fixtures:
-the page is served by Playwright for https://claude.ai/ and never reaches Claude.
+The page, the CLI prompt and the team server are local fixtures: the page is served by Playwright for
+https://claude.ai/ and never reaches Claude; the prompt is tools/smoke_terminal.py --tui.
 
 python tools/smoke_windows_package.py dist/KPGuard/KPGuard.exe   (interactive Windows desktop)
 """
@@ -136,6 +137,32 @@ def check(path):
             raise
         assert app.poll() is None
         print("Packaged executable: Chrome claude.ai composer -> fixture server -> native visible mark passed.")
+
+        # The same executable over a CLI prompt in a console: only the prompt is read, and it is marked.
+        from smoke_terminal import DRAFT as CLI_DRAFT, front_console
+
+        sent = local / "sent.txt"
+        console = subprocess.Popen(
+            [sys.executable, str(TOOLS / "smoke_terminal.py"), "--tui", str(sent)],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        exits.callback(terminate, console)
+
+        def until(predicate, what, limit=20):
+            wait_for(predicate, what, limit)
+
+        console_hwnd = front_console(win, until)
+        wait_for(lambda: not painted(), "browser marks still shown over the console")
+        win.type_text(CLI_DRAFT)
+        wait_for(lambda: CLI_DRAFT.rstrip() in previews, "packaged GUI did not scan the console CLI prompt")
+        assert all("HISTORY_ONLY" not in text for text in previews), "console scrollback reached the server"
+        try:
+            wait_for(painted, "no visible native word mark over the console CLI prompt")
+        except AssertionError:
+            print(f"console in front={win.foreground() == console_hwnd}, received={len(previews)}", flush=True)
+            raise
+        assert app.poll() is None
+        print("Packaged executable: console Codex CLI prompt -> fixture server -> native visible mark passed.")
 
 
 if __name__ == "__main__":

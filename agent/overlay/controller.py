@@ -6,6 +6,8 @@
     원문유지 → 업무상 필요 / 오탐 / 승인된 개인정보
   최종 선택 뒤에는 결과 칩 하나(다음 항목 · 되돌리기)가 뜬다.
   하이라이트가 남아 있으면 그 입력창의 Enter(전송)를 막고 첫 항목의 칩을 연다.
+읽는 곳: 브라우저의 Claude(claude.ai)·Codex(chatgpt.com/codex), 터미널의 Claude Code·Codex CLI 프롬프트.
+터미널 프롬프트는 커서를 옮길 수 없어 마지막 줄을 Backspace로 지우고 다시 입력한다 (source.retype).
 """
 
 import queue
@@ -20,7 +22,7 @@ from ..sanitize.josa import ro as _ro
 from .chips import Cascade, Menu, Option, TkSurface
 from ..server.client import ServerError
 from .live import LiveRanges
-from .source import OWN_WINDOW
+from .source import OWN_WINDOW, TARGETS, TERMINALS, retype
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,12 @@ def make_frame(source, spans):
 
 def channel_of(key):
     return "native:%x" % (hash(key) & 0xFFFFFFFFFFFF)
+
+
+def _edit_failed(key):
+    if len(key) > 1 and key[1] in TERMINALS:
+        return "터미널에서는 커서가 입력 끝에 있을 때 마지막 줄의 값만 바꿀 수 있어요."
+    return "입력창에서 바꾸지 못했어요. 입력창을 누른 뒤 다시 시도해 주세요."
 
 
 class NativeOverlay:
@@ -114,8 +122,13 @@ class NativeOverlay:
     def _preview(self, text, key=None):
         if self.stop.is_set() or not self.enabled():
             return {"spans": []}
-        channel = channel_of(key[0]) if key else None
-        return self.app.browser_actions.preview(text, channel)
+        return self._check(text, key[0] if key else None)
+
+    def _check(self, text, source=None):
+        """한 입력창의 글을 검사한다. source(읽은 입력창의 키)의 종류로 결정이 가는 AI를 정한다."""
+        if source is None:
+            return self.app.browser_actions.preview(text)
+        return self.app.browser_actions.preview(text, channel_of(source), target=TARGETS.get(source[1]))
 
     # ------------------------------------------------------------------ 손쉬운 사용 스레드
     def _read(self, reader_class):
@@ -195,6 +208,8 @@ class NativeOverlay:
         focus = getattr(reader, "focus", None)
         if focus is not None:
             focus(key)
+        if key[1] in TERMINALS:
+            return self._retype(reader, key, text, changes)
         expected = text
         for a, b, new in sorted(changes, key=lambda c: c[0], reverse=True):
             source = self._fresh(reader, key, expected)
@@ -202,6 +217,19 @@ class NativeOverlay:
                 return False
             expected = expected[:a] + new + expected[b:]
         return self._fresh(reader, key, expected, wait=0.6) is not None
+
+    def _retype(self, reader, key, text, changes):
+        """터미널 프롬프트: 커서가 입력 끝에 있을 때 마지막 줄을 지우고 다시 입력한다."""
+        source = self._fresh(reader, key, text)
+        if source is None or source.keys is None:
+            return False
+
+        def read():
+            now = reader.sample()
+            return now.draft.text if now not in (None, OWN_WINDOW) and now.key == key else None
+
+        expected = retype(read, source.keys, text, changes)
+        return expected is not None and self._fresh(reader, key, expected, wait=0.8) is not None
 
     def _fresh(self, reader, key, text, wait=0.3):
         """입력창이 그 글이 될 때까지 잠깐 기다리며 다시 읽는다."""
@@ -222,7 +250,9 @@ class NativeOverlay:
                 if self.chip and self.chip_text and (frame.key, frame.text) != self.chip_text:
                     self._dismiss()
                 if frame.marks != self.shown.marks:
-                    self.paint.draw([m.bounds for m in frame.marks])
+                    # 터미널의 표시는 클릭을 직접 받는다 (콘솔이 선택 모드로 멈추지 않게)
+                    terminal = len(frame.key) > 1 and frame.key[1] in TERMINALS
+                    self.paint.draw([m.bounds for m in frame.marks], solid=terminal)
                 self.shown = frame
             if frame.marks or self.chip or self.pressed:
                 self._mouse(frame, *self.paint.pointer())
@@ -416,7 +446,7 @@ class NativeOverlay:
                 self._finish(frame, span, word, lambda: self._undo_mask(frame, span, result))
             else:
                 actions.commit(channel, result["ticket"], result["keys"], applied=False)
-                self._result(frame, span, "입력창에서 바꾸지 못했어요. 입력창을 누른 뒤 다시 시도해 주세요.", "error")
+                self._result(frame, span, _edit_failed(frame.key), "error")
 
         self.edits.put((frame.key, frame.text, result["edits"], done))
 
@@ -482,7 +512,9 @@ class NativeOverlay:
         def done(ok):
             if not ok:
                 actions.commit(channel, result["ticket"], result["keys"])
-                self._result(frame, span, "되돌리지 못했어요. 입력이 바뀌었는지 확인해 주세요.", "error")
+                self._result(frame, span, "되돌리지 못했어요. " + (
+                    "터미널에서는 커서가 입력 끝에 있어야 해요." if key[1] in TERMINALS
+                    else "입력이 바뀌었는지 확인해 주세요."), "error")
 
         self.edits.put((key, now.text, back["edits"], done))
 

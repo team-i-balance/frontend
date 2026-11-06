@@ -9,10 +9,11 @@ from collections import deque
 from ctypes import wintypes as W
 
 import uiautomation as u
+from comtypes import COMError
 from comtypes.client import CreateObject, GetModule
 
 from ..server.client import MAX_TEXT
-from .source import OWN_WINDOW, Draft, Snapshot, clip, composer, site
+from .source import OWN_WINDOW, Draft, Keys, Snapshot, clip, composer, sends, site, terminal_draft
 
 user = C.WinDLL("user32", use_last_error=True)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -42,6 +43,8 @@ BROWSERS = {
     "opera.exe",
     "arc.exe",
 }
+# Windows Terminal and the classic console host (Claude Code / Codex CLI prompts).
+CONSOLES = {"windowsterminal.exe", "openconsole.exe", "conhost.exe"}
 
 
 def executable(pid):
@@ -130,7 +133,7 @@ def editor_range(field, doc):
     return None
 
 
-def exact_range(text_range, raw, a, b):
+def exact_range(text_range, raw, a, b, console=False):
     """UIA text units need not match Python code points (emoji, CRLF). Verify the exact occurrence."""
     rest = text_range.Clone()
     needle = raw[a:b]
@@ -150,7 +153,11 @@ def exact_range(text_range, raw, a, b):
             if raw.count(needle) > 1:
                 prefix = text_range.Clone()
                 prefix.MoveEndpointByRange(1, match, 0, 0)
-                if prefix.GetText(-1) != raw[:a]:
+                actual, wanted = prefix.GetText(-1), raw[:a]
+                # Console providers trim padding at the end of a clipped range.
+                if console:
+                    actual, wanted = actual.rstrip(), wanted.rstrip()
+                if actual != wanted:
                     return None
             return match
         cursor = expected + len(needle)
@@ -158,9 +165,65 @@ def exact_range(text_range, raw, a, b):
     return None
 
 
-def boxes(text_range, raw, a, b):
-    match = exact_range(text_range, raw, a, b)
+def boxes(text_range, raw, a, b, console=False):
+    match = exact_range(text_range, raw, a, b, console)
     return [rect(r) for r in match.GetBoundingRectangles()] if match else []
+
+
+def console_line(view, number):
+    """The provider's range for visible row `number`. Move by native lines: UIA character units count
+    padded console cells differently from GetText."""
+    line = view.Clone()
+    line.MoveEndpointByRange(1, line, 0, 0)
+    if number and line.MoveEndpointByUnit(1, u.TextUnit.Line, number, 0) != number:
+        return None
+    line.MoveEndpointByRange(0, line, 1, 0)
+    line.ExpandToEnclosingUnit(u.TextUnit.Line, 0)
+    return line
+
+
+def console_line_boxes(view, raw, a, b):
+    # Some console providers only implement character bounds within individual visual line ranges.
+    rows = raw.splitlines(keepends=True)
+    offset = 0
+    for number, row in enumerate(rows):
+        if offset <= a < offset + len(row):
+            break
+        offset += len(row)
+    else:
+        return []
+    line = console_line(view, number)
+    if line is None:
+        return []
+    text = line.GetText(-1)
+    if text.rstrip() != row.rstrip():
+        return []
+    start, end = a - offset, b - offset
+    if end > len(text):
+        return []
+    try:
+        result = boxes(line, text, start, end, console=True)
+    except (OSError, COMError):
+        result = []
+    if result:
+        return result
+    line.MoveEndpointByRange(1, line, 0, 0)
+    line.MoveEndpointByUnit(1, u.TextUnit.Character, start, 0)
+    line.MoveEndpointByRange(0, line, 1, 0)
+    line.MoveEndpointByUnit(1, u.TextUnit.Character, end - start, 0)
+    return [rect(r) for r in line.GetBoundingRectangles()] if line.GetText(-1) == raw[a:b] else []
+
+
+def console_rows_box(view, first, last, viewport):
+    """Screen rectangle of visible rows first..last across the console's width (a CLI's prompt block)."""
+    edges = []
+    for number in (first, last):
+        line = console_line(view, number)
+        parts = [rect(r) for r in line.GetBoundingRectangles()] if line is not None else []
+        if not parts:
+            return None
+        edges.append((min(p[1] for p in parts), max(p[3] for p in parts)))
+    return clip((viewport[0], edges[0][0], viewport[2], edges[1][1]), viewport)
 
 
 # ---------------------------------------------------------------- typed input (in-place edits)
@@ -220,6 +283,15 @@ def press(vk, times=1):
     return keystrokes([e for _ in range(times) for e in (_key(vk=vk), _key(vk=vk, flags=0x0002))])
 
 
+def tap(vk, times, gap=0.008):
+    """One key at a time: a TUI may read a burst of keys as a single input and drop all but one."""
+    for _ in range(times):
+        if not press(vk):
+            return False
+        time.sleep(gap)
+    return True
+
+
 def bring_to_front(hwnd, wait=0.5):
     if foreground() == hwnd:
         return True
@@ -260,6 +332,7 @@ class Reader:
             automation.CreatePropertyCondition(u.PropertyId.AriaRoleProperty, "textbox"),
         )
         self.reason = "foreground"
+        self.prompt_box = None  # ((hwnd, visible text, rows), rectangle) of the last terminal prompt
         return self
 
     def __exit__(self, *args):
@@ -328,11 +401,14 @@ class Reader:
         if pid.value == os.getpid():
             return OWN_WINDOW
         exe = executable(pid.value)
-        if exe not in BROWSERS:
+        if exe not in BROWSERS | CONSOLES:
             return None
         focused = u.GetFocusedControl()
         top = focused.GetTopLevelControl() if focused else None
         lineage = list(ancestry(focused)) if top and top.NativeWindowHandle == hwnd else []
+        if exe in CONSOLES:
+            self.reset()
+            return self.terminal(hwnd, lineage)
         docs = [n for n in lineage if n.ControlTypeName == "DocumentControl"]
         in_focus = bool(docs)  # the keyboard focus is inside the page (not the address bar or other chrome)
         # After clicking page chrome the focused UIA element often belongs to the address bar.
@@ -374,6 +450,62 @@ class Reader:
             if len(raw) <= MAX_TEXT:
                 return self.snapshot(hwnd, site(url), field, view, raw, Draft.plain(raw), url, typing)
         return None
+
+    def terminal(self, hwnd, lineage):
+        """The editable prompt of a Claude Code / Codex CLI in the focused console. Never the scrollback."""
+        self.reason = "terminal-prompt"
+        for field in lineage:
+            if field.ControlTypeName not in ("TextControl", "DocumentControl", "EditControl", "PaneControl"):
+                continue
+            pattern = field.GetPattern(u.PatternId.TextPattern)
+            if not pattern:
+                continue
+            visible = pattern.GetVisibleRanges()
+            if not visible:
+                continue
+            # Console providers may expose the viewport as one range per visible row.
+            view = visible[0].Clone()
+            view.MoveEndpointByRange(1, visible[-1], 1, 0)
+            raw = view.GetText(100001)
+            draft = terminal_draft(raw, u.GetWindowText(hwnd))
+            if draft is not None:
+                return self.console_snapshot(hwnd, field, view, raw, draft)
+        return None
+
+    def console_snapshot(self, hwnd, field, view, raw, draft):
+        viewport = rect(field.BoundingRectangle)
+        if viewport[2] <= viewport[0] or viewport[3] <= viewport[1]:
+            area = W.RECT()
+            api(user, "GetWindowRect", W.BOOL, W.HWND, C.POINTER(W.RECT))(hwnd, C.byref(area))
+            viewport = rect(area)
+
+        def ranges(a, b):
+            for start, end in draft.parts(a, b):
+                try:
+                    regions = boxes(view, raw, start, end, console=True)
+                except (OSError, COMError):
+                    regions = []
+                if not regions:
+                    regions = console_line_boxes(view, raw, start, end)
+                for region in regions:
+                    visible = clip(region, viewport)
+                    if visible:
+                        yield visible
+
+        # Chips sit beside the prompt block, not beside the whole console window.
+        cache = (hwnd, raw, draft.rows)
+        if self.prompt_box is None or self.prompt_box[0] != cache:
+            try:
+                box = console_rows_box(view, *draft.rows, viewport)
+            except (OSError, COMError):
+                box = None
+            self.prompt_box = cache, box or viewport
+        keys = Keys(
+            type=lambda text: foreground() == hwnd and type_text(text),
+            back=lambda times: foreground() == hwnd and tap(0x08, times),  # VK_BACK
+        )
+        key = (hwnd, draft.app, tuple(field.GetRuntimeId()), "")
+        return Snapshot(key, draft, ranges, None, self.prompt_box[1], True, keys)
 
     @staticmethod
     def snapshot(hwnd, kind, field, view, raw, draft, url="", focused=True):
@@ -424,6 +556,7 @@ class Paint:
     def __init__(self):
         self.handles = []
         self.alphas = []
+        self.solid = []  # the mark takes the click itself (terminals) instead of passing it through
         self.name = "KPGuardTextMark"
         self.instance = api(kernel, "GetModuleHandleW", W.HMODULE, W.LPCWSTR)(None)
         # Signal blue #3D7EF7 (COLORREF is 0x00BBGGRR): a light fill plus a 2px underline per range.
@@ -464,8 +597,12 @@ class Paint:
         self.layer = api(user, "SetLayeredWindowAttributes", W.BOOL, W.HWND, W.DWORD, W.BYTE, W.DWORD)
         self.show = api(user, "ShowWindow", W.BOOL, W.HWND, C.c_int)
         self.destroy = api(user, "DestroyWindow", W.BOOL, W.HWND)
+        self.get_style = api(user, "GetWindowLongPtrW", C.c_ssize_t, W.HWND, C.c_int)
+        self.set_style = api(user, "SetWindowLongPtrW", C.c_ssize_t, W.HWND, C.c_int, C.c_ssize_t)
 
-    def draw(self, regions):
+    def draw(self, regions, solid=False):
+        """solid: the marks take clicks so the window below never sees them. A console in QuickEdit mode
+        would start a selection on a click and pause the CLI until the next key."""
         shapes = []
         for x, y, r, b in regions:
             shapes.append((x, y, r, b, 64))                       # fill ~25%
@@ -480,6 +617,11 @@ class Paint:
                     raise C.WinError(C.get_last_error())
                 self.handles.append(hwnd)
                 self.alphas.append(None)
+                self.solid.append(False)
+            if self.solid[i] != solid:
+                style = self.get_style(self.handles[i], -20)  # GWL_EXSTYLE
+                self.set_style(self.handles[i], -20, style & ~0x20 if solid else style | 0x20)
+                self.solid[i] = solid
             if self.alphas[i] != alpha:
                 self.layer(self.handles[i], 0, alpha, 2)
                 self.alphas[i] = alpha
@@ -638,7 +780,7 @@ call_next_hook = api(user, "CallNextHookEx", W.LPARAM, W.HHOOK, C.c_int, W.WPARA
 
 
 class EnterGuard:
-    """While highlights remain, swallow a plain Enter (send) in that editor's window. Shift+Enter still adds a line.
+    """While highlights remain, swallow an Enter that may send in that editor's window. Shift+Enter still adds a line.
 
     target() returns the guarded window handle or None. blocked() runs on the hook thread and must only post.
     """
@@ -681,8 +823,12 @@ class EnterGuard:
                 if info.vkCode == 0x0D and not info.flags & 0x10:  # VK_RETURN, not injected
                     if wparam in (0x0100, 0x0104):  # WM_KEYDOWN, WM_SYSKEYDOWN
                         target = self.target()
-                        shift = user.GetAsyncKeyState(0x10) & 0x8000
-                        if target and not shift and foreground() == target:
+
+                        def down(*keys):
+                            return any(user.GetAsyncKeyState(k) & 0x8000 for k in keys)
+
+                        # Shift alone adds a line. Plain, Ctrl or Win+Return may send.
+                        if target and sends(down(0x10), down(0x11), down(0x5B, 0x5C)) and foreground() == target:
                             self.swallowed = True
                             self.blocked()
                             return 1

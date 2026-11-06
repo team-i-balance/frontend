@@ -1,6 +1,7 @@
 # Claude(claude.ai)의 입력 중 검사 (AI 누리 보안 확장)
 
-> 시연 범위(2026-11-05): claude.ai(Claude Code 웹 포함)에서만 동작한다. ChatGPT는 지원하지 않는다.
+> 시연 범위: 확장은 claude.ai(Claude Code 웹 포함)에서만 동작한다. ChatGPT 대화는 지원하지 않는다.
+> Codex 웹(chatgpt.com/codex)과 터미널의 Claude Code·Codex CLI는 확장 없이 PC 앱이 같은 칩 화면으로 다룬다.
 
 PC 앱과 확장이 같은 컴퓨터에서 실행됩니다. 기본 처리 위치인 **서버에서 처리**를 쓰면 Claude(claude.ai)의 프롬프트 편집 내용이 입력 중 팀 서버로 전송됩니다. 팀 서버의 인증서와 토큰은 PC 앱에서 설정합니다. **이 PC에서만 처리**를 선택하면 로컬 엔진으로 검사합니다.
 

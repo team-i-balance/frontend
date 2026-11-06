@@ -10,16 +10,24 @@ from unittest.mock import Mock
 from agent.browser.actions import BrowserActions
 from agent.overlay.controller import Frame, NativeOverlay, make_frame
 from agent.overlay.live import LiveRanges
-from agent.overlay.source import Draft, Snapshot, clip, composer, site
+from agent.overlay.source import (
+    MARKER, Draft, Keys, Snapshot, clip, composer, retype, row_span, sends, site, terminal_draft,
+)
 
 
 class DraftTests(unittest.TestCase):
     def test_trusted_editors(self):
-        # Claude in the browser only (claude.ai, including Claude Code on the web).
+        # Claude in the browser (claude.ai, including Claude Code on the web) and Codex in the browser.
         self.assertEqual(site("https://claude.ai/new"), "claude.ai")
         self.assertEqual(site("https://claude.ai/code"), "claude.ai")
+        self.assertEqual(site("https://chatgpt.com/codex"), "chatgpt.com/codex")
+        self.assertEqual(site("https://chatgpt.com/codex/tasks/task_e_1?tab=diff"), "chatgpt.com/codex")
         for url in (
-            "https://chatgpt.com/c/123",
+            "https://chatgpt.com/c/123",  # ChatGPT chats are not read, only Codex
+            "https://chatgpt.com/",
+            "https://chatgpt.com/codexx",
+            "https://chatgpt.com.evil.test/codex",
+            "http://chatgpt.com/codex",
             "https://claude.ai.evil.test",
             "https://claude.ai@evil.test",
             "http://claude.ai",
@@ -29,7 +37,36 @@ class DraftTests(unittest.TestCase):
             self.assertFalse(site(url))
         self.assertTrue(composer("", "tiptap ProseMirror", "", True))
         self.assertTrue(composer("", "", "Reply to Claude", False))
+        self.assertTrue(composer("prompt-textarea", "", "", False))  # ChatGPT·Codex composer
+        self.assertTrue(composer("", "", "Describe a task", False))
         self.assertFalse(composer("search", "", "Search chats", True))
+
+    def test_claude_only_draft_never_scrollback(self):
+        raw = "previous reply: PRIVATE\r\n─────────────────\r\n❯ 한글 🧪 010\r\n  다음 줄\r\n─────────────────\r\n  ? for shortcuts\r\n"
+        draft = terminal_draft(raw)
+        self.assertEqual(draft.text, "한글 🧪 010\n다음 줄")
+        self.assertEqual(draft.app, "cli:claude")
+        for token in ("한글", "🧪", "010", "다음 줄"):
+            offset = draft.text.index(token)
+            self.assertEqual("".join(raw[a:b] for a, b in draft.parts(offset, offset + len(token))), token)
+        self.assertEqual([raw[a:b] for a, b in draft.parts(5, len(draft.text))], ["010", "다음 줄"])
+        self.assertEqual(raw[slice(*row_span(raw, *draft.rows))], "❯ 한글 🧪 010\r\n  다음 줄")
+        self.assertIsNone(terminal_draft(raw + "$ ", "Claude Code"))
+
+    def test_codex_active_prompt_after_previous_turn(self):
+        raw = "OpenAI Codex (v1)\n› old private turn\n• response\n› current draft\n\n  ? for shortcuts\n"
+        draft = terminal_draft(raw)
+        self.assertEqual((draft.text, draft.app), ("current draft", "cli:codex"))
+        self.assertEqual(terminal_draft(raw.replace("current draft", "")).text, "")
+        self.assertIsNone(terminal_draft("› ordinary shell\n  ? for shortcuts"))
+        self.assertIsNone(terminal_draft("❯ sudo example\n", "Claude Code"))
+        self.assertIsNone(terminal_draft("OpenAI Codex\n› old\n  ? for shortcuts\n$ echo new"))
+
+    def test_return_that_may_send(self):
+        self.assertTrue(sends(False, False, False))   # Return
+        self.assertFalse(sends(True, False, False))   # Shift+Return: a new line
+        self.assertTrue(sends(False, True, False))    # Ctrl+Return
+        self.assertTrue(sends(True, False, True))     # Shift+Cmd+Return
 
     def test_frame_geometry_does_not_use_the_caret_or_selection(self):
         draft = Draft.plain("010 010")
@@ -40,6 +77,61 @@ class DraftTests(unittest.TestCase):
         self.assertIsNone(frame.hit(-97, 25))
         self.assertEqual(clip((-2, -1, 20, 5), (0, 0, 10, 10)), (0, 0, 10, 5))
         self.assertIsNone(clip((-2, -1, 0, 5), (0, 0, 10, 10)))
+
+
+class Prompt:
+    """A TUI prompt: one caret, Backspace deletes before it, typed spaces stay but are not shown at the end."""
+
+    def __init__(self, text, caret=None, echo=True):
+        self.buffer, self.echo = text, echo
+        self.caret = len(text) if caret is None else caret
+        self.typed = []
+
+    def read(self):
+        return self.buffer.rstrip(" ")
+
+    def keys(self):
+        def type_(text):
+            self.typed.append(text)
+            if self.echo:
+                self.buffer = self.buffer[: self.caret] + text + self.buffer[self.caret :]
+                self.caret += len(text)
+            return True
+
+        def back(times):
+            self.typed.append("\b" * times)
+            for _ in range(times):
+                if self.caret:
+                    self.buffer = self.buffer[: self.caret - 1] + self.buffer[self.caret :]
+                    self.caret -= 1
+            return True
+
+        return Keys(type_, back)
+
+
+class TerminalRetypeTests(unittest.TestCase):
+    def test_value_in_the_last_line_is_retyped_and_typed_spaces_stay(self):
+        prompt = Prompt("고객 010-2345-6789 연락 ")
+        text = prompt.read()
+        a = text.index("010")
+        self.assertEqual(retype(prompt.read, prompt.keys(), text, [[a, a + 13, "[전화번호_1]"]], wait=0.05),
+                         "고객 [전화번호_1] 연락")
+        self.assertEqual(prompt.buffer, "고객 [전화번호_1] 연락 ")
+        self.assertEqual(prompt.caret, len(prompt.buffer))
+
+    def test_caret_elsewhere_or_earlier_line_changes_nothing(self):
+        prompt = Prompt("고객 010-2345-6789 연락", caret=2)
+        text = prompt.read()
+        self.assertIsNone(retype(prompt.read, prompt.keys(), text, [[3, 16, "[x]"]], wait=0.05))
+        self.assertEqual(prompt.buffer, text)  # the marker was taken out again
+        prompt = Prompt("010-2345-6789\n다음 줄")
+        self.assertIsNone(retype(prompt.read, prompt.keys(), prompt.read(), [[0, 13, "[x]"]], wait=0.05))
+        self.assertEqual(prompt.typed, [])  # refused before any keystroke
+
+    def test_no_backspace_when_the_marker_never_shows(self):
+        prompt = Prompt("고객 010", echo=False)
+        self.assertIsNone(retype(prompt.read, prompt.keys(), prompt.read(), [[3, 6, "[x]"]], wait=0.05))
+        self.assertEqual(prompt.typed, [MARKER])
 
 
 class LiveTests(unittest.TestCase):
@@ -173,6 +265,17 @@ class NativePlatformTests(unittest.TestCase):
                 )(hwnd, -20)
                 self.assertEqual(style & 0x08080020, 0x08080020)
                 self.assertEqual(platform.foreground(), before)
+                # Over a console the marks take the click (QuickEdit would pause the CLI), still without focus.
+                paint.draw([(200, 100, 245, 120)], solid=True)
+                style = platform.api(
+                    platform.user, "GetWindowLongW", platform.W.LONG, platform.W.HWND, platform.C.c_int
+                )(hwnd, -20)
+                self.assertEqual(style & 0x08080020, 0x08080000)
+                paint.draw([(200, 100, 245, 120)])
+                style = platform.api(
+                    platform.user, "GetWindowLongW", platform.W.LONG, platform.W.HWND, platform.C.c_int
+                )(hwnd, -20)
+                self.assertEqual(style & 0x08080020, 0x08080020)
             else:
                 self.assertTrue(paint.panels[0].ignoresMouseEvents())
                 self.assertFalse(paint.panels[0].isKeyWindow())
