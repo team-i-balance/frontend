@@ -36,7 +36,7 @@ def tui(sent):
     kernel = ctypes.windll.kernel32
     kernel.SetConsoleTitleW(TITLE)
     out = open("CONOUT$", "w", encoding="utf-8")  # also works when the runner redirects stdio
-    handle = msvcrt.get_osfhandle(out.fileno())
+    handle = ctypes.c_void_p(msvcrt.get_osfhandle(out.fileno()))
     mode = ctypes.c_uint32()
     if kernel.GetConsoleMode(handle, ctypes.byref(mode)):
         kernel.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
